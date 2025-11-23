@@ -1,3 +1,4 @@
+![](/photos/image.png)
 # PwnRM - WinRM Remote Management Shell
 
 A rewritten and enhanced WinRM execution tool based on `wmiexec` and `winrmexec`, providing a comprehensive remote management shell with advanced capabilities for Windows target systems.
