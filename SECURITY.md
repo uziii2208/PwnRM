@@ -254,7 +254,6 @@ We do **not** offer monetary bounties at this time. PwnRM is a community-driven 
 
 ## 📚 Related Security Documentation
 
-- [`AGENT-WINDOWS.md`](AGENT-WINDOWS.md) — AD attack methodology (methodology only, no secrets)
 - [`LICENSE`](LICENSE) — MIT License (includes disclaimer of liability)
 - [`README.md#disclaimer`](README.md) — Operational security guidance for users
 
