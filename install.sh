@@ -1,8 +1,6 @@
 #!/bin/bash
-
 # PwnRM Installation Script for Linux
 # Supports Kali Linux, Ubuntu, Debian, and other Debian-based distributions
-
 set -e
 
 # Colors for output
@@ -13,13 +11,14 @@ NC='\033[0m' # No Color
 
 echo -e "${GREEN}================================${NC}"
 echo -e "${GREEN}  PwnRM Installation Script${NC}"
-echo -e "${GREEN}================================${NC}\n"
+echo -e "${GREEN}================================${NC}"
+echo
 
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}[!] This script must be run as root${NC}"
-   echo "Please run: sudo bash install.sh"
-   exit 1
+    echo -e "${RED}[!] This script must be run as root${NC}"
+    echo "Please run: sudo bash install.sh"
+    exit 1
 fi
 
 # Detect Python version
@@ -60,21 +59,38 @@ else
     echo -e "${GREEN}[+] Virtual environment already exists${NC}"
 fi
 
-# Activate virtual environment
-source venv/bin/activate
+# Use venv python directly (don't source activate in script)
+VENV_PYTHON="$INSTALL_DIR/venv/bin/python3"
+VENV_PIP="$INSTALL_DIR/venv/bin/pip"
 
-# Upgrade pip
+# Upgrade pip (without hiding errors)
 echo -e "${YELLOW}[*] Upgrading pip...${NC}"
-pip install --upgrade pip setuptools wheel > /dev/null 2>&1
+"$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel
+if [ $? -ne 0 ]; then
+    echo -e "${RED}[!] Failed to upgrade pip${NC}"
+    exit 1
+fi
 
 # Install Python dependencies
 echo -e "${YELLOW}[*] Installing Python dependencies...${NC}"
 if [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt
+    "$VENV_PIP" install -r requirements.txt
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[!] Failed to install dependencies${NC}"
+        exit 1
+    fi
     echo -e "${GREEN}[+] Dependencies installed${NC}"
 else
     echo -e "${RED}[!] requirements.txt not found${NC}"
     exit 1
+fi
+
+# Verify critical dependencies
+echo -e "${YELLOW}[*] Verifying installation...${NC}"
+"$VENV_PYTHON" -c "import impacket; import pywinrm; import requests; print('[+] All critical modules loaded successfully')" 2>/dev/null
+if [ $? -ne 0 ]; then
+    echo -e "${YELLOW}[*] Installing missing critical dependencies...${NC}"
+    "$VENV_PIP" install impacket pywinrm requests cryptography prompt_toolkit
 fi
 
 # Make main script executable
@@ -85,7 +101,6 @@ echo -e "${YELLOW}[*] Creating command wrapper...${NC}"
 cat > /usr/local/bin/pwnrm << 'EOF'
 #!/bin/bash
 # PwnRM Wrapper Script
-
 INSTALL_DIR="/opt/pwnrm"
 
 if [ ! -d "$INSTALL_DIR" ]; then
@@ -100,17 +115,15 @@ EOF
 chmod +x /usr/local/bin/pwnrm
 echo -e "${GREEN}[+] Wrapper script created at /usr/local/bin/pwnrm${NC}"
 
-# Deactivate virtual environment
-deactivate
-
-echo -e "\n${GREEN}================================${NC}"
+echo
+echo -e "${GREEN}================================${NC}"
 echo -e "${GREEN}  Installation Complete!${NC}"
-echo -e "${GREEN}================================${NC}\n"
-
+echo -e "${GREEN}================================${NC}"
+echo
 echo -e "${GREEN}[+] You can now run PwnRM from anywhere:${NC}"
-echo -e "${YELLOW}    pwnrm -h${NC}\n"
-
+echo -e "${YELLOW}    pwnrm -h${NC}"
+echo
 echo -e "${YELLOW}[*] Installation directory: ${INSTALL_DIR}${NC}"
-echo -e "${YELLOW}[*] To uninstall, run: sudo rm -rf ${INSTALL_DIR} && sudo rm /usr/local/bin/pwnrm${NC}\n"
-
+echo -e "${YELLOW}[*] To uninstall, run: sudo rm -rf ${INSTALL_DIR} && sudo rm /usr/local/bin/pwnrm${NC}"
+echo
 echo -e "${GREEN}[+] Enjoy your meal!${NC}"
