@@ -116,6 +116,20 @@ These are features, not bugs:
 ### Third-Party Tool Vulnerabilities
 Bugs in Impacket, NetExec, Certipy, BloodHound, Rubeus, etc. that PwnRM wraps → report to upstream projects.
 
+### Known & Accepted Design Decisions
+
+The following are intentional design decisions. Reports about them will be closed
+unless a concrete attack with **operator-side impact** (beyond the threat model
+below) is demonstrated:
+
+- **XOR on uploads (`!upload -xor`)** is *obfuscation for AV/AMSI evasion on the
+  target*, not a confidentiality mechanism. The WinRM channel is the security
+  boundary — use `-ssl` for TLS. An interceptor of plaintext HTTP WinRM traffic
+  already sees everything, with or without XOR.
+- **Hashes on file transfers** are for accidental-corruption detection only, not
+  for security. An active MITM on an unencrypted WinRM channel can already
+  modify traffic regardless of the hash algorithm.
+
 ---
 
 ## Reporting a Vulnerability
