@@ -824,17 +824,40 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
         if not args or len(args) > 2:
             self.write_warning("usage: !download RPATH [LPATH]"); return
 
+        # [GHSA-x4cv-p53p-wh3w - SECURITY FIX 1] Lấy tên file từ CHÍNH INPUT CỦA USER (args[0]).
+        # Tuyệt đối không dùng src.name do server trả về để tránh bị spoof tên file độc hại.
+        user_rpath = PureWindowsPath(args[0])
+        safe_filename = user_rpath.name
+        
+        # Fallback nếu user truyền đường dẫn root (vd: "C:\") thì không có tên file
+        if not safe_filename:
+            safe_filename = "downloaded_file"
+
+        # Giữ nguyên logic query server để lấy đường dẫn thật (dùng cho logging và check directory)
         src = self.run_sync(f"Resolve-Path -LiteralPath '{args[0]}' | Select -Expand Path")
         if not src:
             self.write_warning(f"{args[0]} not found on remote"); return
         src = PureWindowsPath(src.strip())
-        dst = Path(args[1]) if len(args) == 2 else Path(src.name)
-        if dst.is_dir(): dst = dst / src.name
-        if not dst.parent.exists(): os.makedirs(dst.parent, exist_ok=True)
+        
+        # [GHSA-x4cv-p53p-wh3w - SECURITY FIX 2] Build đường dẫn local dựa trên safe_filename thay vì src.name
+        dst = Path(args[1]) if len(args) == 2 else Path(safe_filename)
+        if dst.is_dir(): 
+            dst = dst / safe_filename
+            
+        # [DEFENSE IN DEPTH] Chặn local path traversal nếu user lỡ gõ ".." vào LPATH
+        # (Mặc dù CLI thường cho phép, nhưng chặn ở mức filename để an toàn hơn)
+        if '..' in dst.name:
+            self.write_error("Invalid characters ('..') in destination filename."); return
+
+        if not dst.parent.exists(): 
+            os.makedirs(dst.parent, exist_ok=True)
 
         is_dir = self.run_sync(f"Test-Path -Path '{src}' -PathType Container") == "True"
         if is_dir:
-            if not dst.name.lower().endswith(".zip"): dst = dst.parent / f"{dst.name}.zip"
+            # Logic tải thư mục vẫn hoạt động bình thường với safe_filename
+            if not dst.name.lower().endswith(".zip"): 
+                dst = dst.parent / f"{dst.name}.zip"
+                
             self.write_info(f"  [~] Directory → ZIP download: {c(C,str(dst))}")
             tmpdir = self.run_sync("[System.IO.Path]::GetTempPath()")
             tmpnm  = randbytes(8).hex()
@@ -883,12 +906,12 @@ Remove-Item Function:Download-Remote
         if buf[-32:] != MD5.new(buf[:-32]).hexdigest().upper().encode():
             self.write_error("  Download integrity check FAILED!")
             return
+            
         self.write_info(f"  [+] Writing {c(G,str(dst.resolve()))}")
         try:
             with open(dst,"wb") as f: f.write(buf[:-32])
         except IOError as e:
             self.write_error(str(e))
-
 
 # ── entry point ───────────────────────────────────────────────────────────────
 def main():
