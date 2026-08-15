@@ -145,6 +145,6 @@ MIT — see [LICENSE](LICENSE.md).
 
 <div align="center">
 
-**ENJOY YOUR MEAL 🍖**
+**ENJOY YOUR MEAL**
 
 </div>
