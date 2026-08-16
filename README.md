@@ -15,10 +15,11 @@
 
 An operator-grade WinRM execution framework for authorized Active Directory security assessments: interactive PowerShell runspace over MS-PSRP, every modern AD auth path, stealthy payload delivery, and a built-in AD triage engine — usable as a CLI tool **and** as a Python library.
 
-[Installation](#installation) · [Usage](#usage) · [Commands](#commands) · [AD Triage](#ad-triage) · [Library](#library-usage) · [Troubleshooting](#troubleshooting) · [Disclaimer](#%EF%B8%8F-disclaimer) · [Hall Of Fame](HALL_OF_FAME.md)
+[Installation](#installation) · [Usage](#usage) · [Commands](#commands) · [AD Triage](#ad-triage) · [Library Usage](#library-usage) · [Troubleshooting](#troubleshooting) · [Disclaimer](#disclaimer) · [Hall Of Fame](HALL_OF_FAME.md)
 
 </div>
 
+<a id="installation"></a>
 ## Installation
 
 **pip (recommended)**
@@ -46,6 +47,7 @@ python3 -m venv venv && source venv/bin/activate
 pip install -e .
 ```
 
+<a id="usage"></a>
 ## Usage
 
 ```bash
@@ -70,6 +72,7 @@ pwnrm -u admin -p 'P@ss' dc01.corp.local -X "whoami /all"
 
 Key flags: `--port`, `--ssl`, `--timeout`, `--ts`, `--debug`. Run `pwnrm -h` for the full list.
 
+<a id="commands"></a>
 ## Commands
 
 | Command | Description |
@@ -88,12 +91,14 @@ Key flags: `--port`, `--ssl`, `--timeout`, `--ts`, `--debug`. Run `pwnrm -h` for
 
 Tab-completion for all built-ins via `prompt_toolkit`.
 
+<a id="ad-triage"></a>
 ## AD Triage
 
 `!adtriage` runs a self-contained LDAP/WMI enumeration entirely inside the remote PowerShell session — no extra binaries on target. `-q` = quick mode (identity + domain + Server 2025 / BadSuccessor check).
 
 Covers: identity & privileges · domain / forest / DCs / trusts · high-value groups · Kerberoastable SPNs · AS-REP roastables · unconstrained / constrained / RBCD delegation · ADCS templates (ESC1/3/4 quick scan) · gMSA / dMSA (BadSuccessor) · ACL quick-wins on DA/DC/krbtgt · pre-Windows-2000 compat access · password-never-expires admins.
 
+<a id="library-usage"></a>
 ## Library Usage
 
 ```python
@@ -123,6 +128,7 @@ PwnRM/
 └── requirements.txt
 ```
 
+<a id="troubleshooting"></a>
 ## Troubleshooting
 
 | Problem | Fix |
@@ -132,6 +138,7 @@ PwnRM/
 | WinRM connection refused | On target: `Enable-PSRemoting -Force` |
 | AMSI catches payloads | `!amsi` first, or `!upload -xor` + `!netrun -xor` |
 
+<a id="disclaimer"></a>
 ## ⚠️ Disclaimer
 
 PwnRM is for **authorized** security testing, red-team operations, and education only. You must have explicit written authorization (RoE / signed scope) before targeting any system. The authors assume no liability for misuse. Never use against systems you do not own or lack permission to test.
