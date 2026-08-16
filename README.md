@@ -26,6 +26,9 @@ An operator-grade WinRM execution framework for authorized Active Directory secu
 
 ```bash
 pip install pwnrm
+# Update when we have new release
+# (highly recommend when we have critical issue at previous version)
+pip install --upgrade pwnrm
 ```
 
 **git clone + installer** (Kali / Ubuntu / Debian)
