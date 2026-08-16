@@ -278,7 +278,17 @@ class CredSSPTransport(Transport):
         tsreq = TSRequest.nego_response(t3)
         tsreq["clientNonce"] = nonce
         tsreq["pubKeyAuth"]  = proxy.wrap(pkhash, joined=True)
-        _send_credssp(tsreq, "public key exchange")
+        tsrsp2 = _send_credssp(tsreq, "public key exchange")
+        if tsrsp2 and tsrsp2["pubKeyAuth"].hasValue():
+            srv_expected = SHA256.new(
+                b"CredSSP Server-To-Client Binding Hash\x00" + nonce + pubkey
+            ).digest()
+            if bytes(tsrsp2["pubKeyAuth"]) != srv_expected:
+                raise TransportError(
+                    "CredSSP: server pubKeyAuth mismatch — possible MitM, aborting!"
+                )
+        else:
+            raise TransportError("CredSSP: server did not return pubKeyAuth")
         tspass = TSPasswordCreds()
         tspass["domainName"] = self.creds.domain.encode("utf-16le")
         tspass["userName"]   = self.creds.username.encode("utf-16le")

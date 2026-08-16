@@ -31,7 +31,7 @@ def b64str(s):
         return b64encode(s.encode()).decode()
     return b64encode(s).decode()
 
-_utfstr = re.compile(r'x([0-9a-fA-F]{4})')
+_utfstr = re.compile(r'_x([0-9a-fA-F]{4})_')
 def utfstr(s):
     try:
         return _utfstr.sub(lambda m: bytes.fromhex(m.group(1)).decode("utf-16be"), s)
@@ -68,7 +68,7 @@ def get_server_certificate(url):
 def tls_trailer_length(data_length, protocol, cipher_suite):
     if protocol == "TLSv1.3":
         return 17
-    if re.match(r"^.[-_]GCM[-_][\w\d]$", cipher_suite):
+    if re.match(r"^.*[-_]GCM[-_][\w\d]*$", cipher_suite):
         return 16
     hash_algorithm  = cipher_suite.split("-")[-1]
     hash_length     = {"MD5":16, "SHA":20, "SHA256":32, "SHA384":48}.get(hash_algorithm, 0)

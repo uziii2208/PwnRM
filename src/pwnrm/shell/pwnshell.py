@@ -418,7 +418,7 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
         except IOError as e:
             self.write_error(str(e)); return
 
-        tmpfn = self.run_sync("[IO.Path]::GetTempPath()") + randbytes(8).hex() + ".tmp"
+        tmpfn = self._pse(self.run_sync("[IO.Path]::GetTempPath()").strip()) + randbytes(8).hex() + ".tmp"
         total = 0
         self.write_info(f"  [~] Uploading → {c(C,str(tmpfn))}")
         self.run_sync(import_XorEnc)
@@ -438,7 +438,10 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             self.write_error("  Upload integrity check FAILED — file may be corrupted!")
         else:
             self.write_info(c(G, "  [+] Upload complete — MD5 verified."))
-
+    @staticmethod
+    def _pse(path) -> str:
+        """Escape single quotes for safe PS single-quoted string embedding."""
+        return str(path).replace("'", "''")
     # ── !download ─────────────────────────────────────────────────────────────
     def download(self, cmdline):
         args = split_args(cmdline)
@@ -455,10 +458,11 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             safe_filename = "downloaded_file"
 
         # Giữ nguyên logic query server để lấy đường dẫn thật (dùng cho logging và check directory)
-        src = self.run_sync(f"Resolve-Path -LiteralPath '{args[0]}' | Select -Expand Path")
+        src = self.run_sync(f"Resolve-Path -LiteralPath '{self._pse(args[0])}' | Select -Expand Path")
         if not src:
             self.write_warning(f"{args[0]} not found on remote"); return
         src = PureWindowsPath(src.strip())
+        src_ps = self._pse(src)   # escaped version dùng cho tất cả PS embedding bên dưới
         
         # [GHSA-x4cv-p53p-wh3w - SECURITY FIX 2] Build đường dẫn local dựa trên safe_filename thay vì src.name
         dst = Path(args[1]) if len(args) == 2 else Path(safe_filename)
@@ -473,23 +477,23 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
         if not dst.parent.exists(): 
             os.makedirs(dst.parent, exist_ok=True)
 
-        is_dir = self.run_sync(f"Test-Path -Path '{src}' -PathType Container") == "True"
+        is_dir = self.run_sync(f"Test-Path -Path '{src_ps}' -PathType Container") == "True"
         if is_dir:
             # Logic tải thư mục vẫn hoạt động bình thường với safe_filename
             if not dst.name.lower().endswith(".zip"): 
                 dst = dst.parent / f"{dst.name}.zip"
                 
             self.write_info(f"  [~] Directory → ZIP download: {c(C,str(dst))}")
-            tmpdir = self.run_sync("[System.IO.Path]::GetTempPath()")
+            tmpdir = self._pse(self.run_sync("[System.IO.Path]::GetTempPath()").strip())
             tmpnm  = randbytes(8).hex()
             tmpfn  = tmpdir + tmpnm
             ps = f"""
 Add-Type -AssemblyName "System.IO.Compression.FileSystem"
 New-Item -Path '{tmpdir}' -ItemType Directory -Name '{tmpnm}' | Out-Null
-Get-ChildItem -Force -Recurse -Path '{src}' | ForEach-Object {{
+Get-ChildItem -Force -Recurse -Path '{src_ps}' | ForEach-Object {{
     if(-not ($_.FullName -Like "*{tmpnm}*")) {{
         try {{
-            $d = $_.FullName.Replace('{src}', '')
+            $d = $_.FullName.Replace('{src_ps}', '')
             Copy-Item -ErrorAction SilentlyContinue -Force $_.FullName "{tmpfn}\\$d"
         }} catch {{ Write-Warning "skipping $d" }}
     }}
@@ -503,8 +507,8 @@ Remove-Item -Recurse -Force -Path '{tmpfn}'
             src = tmpfn + ".zip"
 
         ps = f"""function Download-Remote {{
-    $h = Get-FileHash '{src}' -Algorithm MD5 | Select -Expand Hash;
-    $f = [System.IO.File]::OpenRead('{src}');
+    $h = Get-FileHash '{src_ps}' -Algorithm MD5 | Select -Expand Hash;
+    $f = [System.IO.File]::OpenRead('{src_ps}');
     $b = New-Object byte[] 65536;
     while(($n = $f.Read($b, 0, 65536)) -gt 0) {{ [Convert]::ToBase64String($b, 0, $n) }};
     $f.Close();
@@ -523,7 +527,7 @@ Remove-Item Function:Download-Remote
 
         self.run_with_interrupt(ps, collect)
 
-        if is_dir: self.run_sync(f"Remove-Item -fo '{src}'")
+        if is_dir: self.run_sync(f"Remove-Item -fo '{src_ps}'")
         if buf[-32:] != MD5.new(buf[:-32]).hexdigest().upper().encode():
             self.write_error("  Download integrity check FAILED!")
             return

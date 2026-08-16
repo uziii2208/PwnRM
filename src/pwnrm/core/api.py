@@ -82,8 +82,12 @@ def create_transport(args) -> "Transport":
 
     # 1. Client certificate (.pfx)
     if getattr(args, "pfx", None):
+        import atexit, os as _os
         cert_pem, key_pem = load_pfx(args.pfx, getattr(args,"pfx_pass","") or None)
         logging.info(f"[+] Using client-cert transport ({args.pfx})")
+        atexit.register(lambda c=cert_pem, k=key_pem: [
+            _os.unlink(p) for p in (c, k) if _os.path.exists(p)
+        ])
         return ClientCertTransport(url, cert_pem, key_pem)
 
     # 2. Kerberos (ccache)
