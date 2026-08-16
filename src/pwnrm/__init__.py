@@ -5,7 +5,7 @@ A Python library and CLI tool for WinRM-based post-exploitation
 and Active Directory enumeration.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __author__  = "uziii2208"
 
 from .core import (

@@ -1,0 +1,58 @@
+1. Run bump version script
+
+```
+PS E:\PwnRM> python .\bump_version.py <X.Y.Z>
+```
+
+2. Activate venv script & build latest version, after that - verify version
+
+```
+PS E:\PwnRM> E:\pwnrm_test\Scripts\Activate.ps1     
+(pwnrm_test) PS E:\PwnRM> python -m build
+...[snip]...
+adding 'pwnrm-X.Y.Z.dist-info/licenses/LICENSE.md'
+adding 'pwnrm-X.Y.Z.dist-info/METADATA'
+adding 'pwnrm-X.Y.Z.dist-info/WHEEL'
+adding 'pwnrm-X.Y.Z.dist-info/entry_points.txt'
+adding 'pwnrm-X.Y.Z.dist-info/top_level.txt'
+adding 'pwnrm-X.Y.Z.dist-info/RECORD'
+removing build\bdist.win-amd64\wheel
+Successfully built pwnrm-X.Y.Z.tar.gz and pwnrm-X.Y.Z-py3-none-any.whl
+(pwnrm_test) PS E:\PwnRM> ls dist
+
+
+    Directory: E:\PwnRM\dist
+
+
+Mode                 LastWriteTime         Length Name                                                                                                                                
+----                 -------------         ------ ----                                                                                                                                
+-a----         8/16/2026  10:44 PM          39706 pwnrm-X.Y.Z-py3-none-any.whl                                                                                                        
+-a----         8/16/2026  10:44 PM          37254 pwnrm-X.Y.Z.tar.gz 
+(pwnrm_test) PS E:\PwnRM> pwnrm -h                                                                                 
+
+
+██████╗ ██╗    ██╗███╗   ██╗██████╗ ███╗   ███╗
+██╔══██╗██║    ██║████╗  ██║██╔══██╗████╗ ████║
+██████╔╝██║ █╗ ██║██╔██╗ ██║██████╔╝██╔████╔██║
+██╔═══╝ ██║███╗██║██║╚██╗██║██╔══██╗██║╚██╔╝██║
+██║     ╚███╔███╔╝██║ ╚████║██║  ██║██║ ╚═╝ ██║
+╚═╝      ╚══╝╚══╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝
+  Advanced WinRM / AD Post-Exploitation Shell  vX.Y.Z
+  github.com/uziii2208/PwnRM  ·  For authorized engagements only.
+```
+
+3. Final, publish into PyPI for new version
+
+```
+(pwnrm_test) PS E:\PwnRM> twine upload dist/*
+Uploading distributions to https://upload.pypi.org/legacy/
+WARNING  This environment is not supported for trusted publishing                                                                                                                      
+Enter your API token: 
+Uploading pwnrm-X.Y.Z-py3-none-any.whl
+100% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 51.2/51.2 kB • 00:00 • 112.0 MB/s
+Uploading pwnrm-X.Y.Z.tar.gz
+100% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 48.8/48.8 kB • 00:00 • 98.5 MB/s
+
+View at:
+https://pypi.org/project/pwnrm/X.Y.Z/
+```
