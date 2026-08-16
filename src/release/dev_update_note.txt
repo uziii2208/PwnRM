@@ -1,7 +1,9 @@
+# Manual update new release into PyPI
+
 1. Run bump version script
 
 ```
-PS E:\PwnRM> python .\bump_version.py <X.Y.Z>
+PS E:\PwnRM\src\release> python .\bump_version.py <X.Y.Z>
 ```
 
 2. Activate venv script & build latest version, after that - verify version
