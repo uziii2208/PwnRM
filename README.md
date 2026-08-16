@@ -1,6 +1,6 @@
 <div align="center">
 
-# PwnRM
+![PwnRM ASCII](src/photos/logo.png)
 
 **Advanced WinRM Post-Exploitation Shell for Windows Active Directory Testing**
 
