@@ -5,6 +5,7 @@
 **Advanced WinRM Post-Exploitation Shell for Windows Active Directory Testing**
 
 ![GitHub stars](https://img.shields.io/github/stars/uziii2208/PwnRM?style=for-the-badge&color=gold&logo=github)
+[![Hall of Fame](https://img.shields.io/badge/Hall_of_Fame-🏆_h4x0rc-gold?style=for-the-badge&logo=trophy)](HALL_OF_FAME.md)
 ![GitHub forks](https://img.shields.io/github/forks/uziii2208/PwnRM?style=for-the-badge&color=blue&logo=github)
 ![GitHub issues](https://img.shields.io/github/issues/uziii2208/PwnRM?style=for-the-badge&color=red&logo=github)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge&logo=opensourceinitiative)
@@ -14,7 +15,7 @@
 
 An operator-grade WinRM execution framework for authorized Active Directory security assessments: interactive PowerShell runspace over MS-PSRP, every modern AD auth path, stealthy payload delivery, and a built-in AD triage engine — usable as a CLI tool **and** as a Python library.
 
-[Installation](#installation) · [Usage](#usage) · [Commands](#commands) · [AD Triage](#ad-triage) · [Library](#library-usage) · [Troubleshooting](#troubleshooting) · [Disclaimer](#%EF%B8%8F-disclaimer)
+[Installation](#installation) · [Usage](#usage) · [Commands](#commands) · [AD Triage](#ad-triage) · [Library](#library-usage) · [Troubleshooting](#troubleshooting) · [Disclaimer](#%EF%B8%8F-disclaimer) · [Hall Of Fame](HALL_OF_FAME.md)
 
 </div>
 
