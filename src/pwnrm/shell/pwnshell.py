@@ -19,6 +19,7 @@ except ImportError:
     _PTK = False
 
 # ── imports from sibling modules ─────────────────────────────────────────────
+from ..core.utils import strip_ansi
 from .ui       import R, G, Y, B, M, C, W, DIM, BLD, RST, c, _BANNER, _COMPLETIONS
 from .ctrlc    import CtrlCHandler
 from .adtriage import get_adtriage_ps
@@ -159,7 +160,7 @@ class PwnShell:
 
     # ── prompt / input ────────────────────────────────────────────────────────
     def update_cwd(self):
-        self.cwd = self.run_sync("Get-Location | Select -Expand Path").strip()
+        self.cwd = strip_ansi(self.run_sync("Get-Location | Select -Expand Path").strip())
 
     def read_line(self):
         while True:
@@ -186,19 +187,21 @@ class PwnShell:
         clr = self._clear(); self.need_clear = False
         log = b""
         if "stdout" in out:
-            print(clr + out["stdout"], flush=True)
-            log = out["stdout"].encode() + b"\n"
+            txt = strip_ansi(out["stdout"])
+            print(clr + txt, flush=True)
+            log = txt.encode() + b"\n"
         elif "info" in out:
-            print(clr + out["info"], end=out["endl"], flush=True)
-            log = (out["info"] + out["endl"]).encode()
+            txt = strip_ansi(out["info"])
+            print(clr + txt, end=out["endl"], flush=True)
+            log = (txt + out["endl"]).encode()
         elif "error" in out:
-            print(clr + c(R, out["error"]), flush=True)
+            print(clr + c(R, strip_ansi(out["error"])), flush=True)
         elif "warn" in out:
-            print(clr + c(Y, "  [!] " + out["warn"]), flush=True)
+            print(clr + c(Y, "  [!] " + strip_ansi(out["warn"])), flush=True)
         elif "verbose" in out:
-            print(clr + c(DIM, out["verbose"]), flush=True)
+            print(clr + c(DIM, strip_ansi(out["verbose"])), flush=True)
         elif "progress" in out:
-            print(clr + c(B, "  [~] " + out["progress"]), end="\r", flush=True)
+            print(clr + c(B, "  [~] " + strip_ansi(out["progress"])), end="\r", flush=True)
             self.need_clear = True
         if self.stdout_log and log:
             self.stdout_log.write(log); self.stdout_log.flush()
