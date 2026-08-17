@@ -7,7 +7,7 @@ from base64 import b64decode
 from struct import pack, unpack
 import xml.etree.ElementTree as ET
 
-from .utils import utfstr, b64str
+from .utils import utfstr, b64str, strip_ansi
 from .psrp  import (
     soap_req, soap_ns, xml_get_text, xml_get_attrib,
     ps_capability, ps_runspace_pool, ps_create_pipeline, ps_command,
@@ -75,24 +75,24 @@ class Runspace:
             for msg_type, msg in self._defragment(rsp["streams"]):
                 if msg_type == PIPELINE_OUTPUT:
                     if msg.tag == "S":
-                        yield {"stdout": utfstr(msg.text) or ""}
+                        yield {"stdout": strip_ansi(utfstr(msg.text) or "")}
                 elif msg_type == ERROR_RECORD:
-                    yield {"error": xml_get_text(msg, ".//ToString", "unknown error")}
+                    yield {"error": strip_ansi(xml_get_text(msg, ".//ToString", "unknown error"))}
                 elif msg_type == WARNING_RECORD:
-                    yield {"warn": xml_get_text(msg, ".//ToString", "unknown warning")}
+                    yield {"warn": strip_ansi(xml_get_text(msg, ".//ToString", "unknown warning"))}
                 elif msg_type == VERBOSE_RECORD:
-                    yield {"verbose": xml_get_text(msg, ".//ToString", "")}
+                    yield {"verbose": strip_ansi(xml_get_text(msg, ".//ToString", ""))}
                 elif msg_type == INFORMATION_RECORD:
-                    info  = xml_get_text(msg, ".//Props/S[@N='Message']", "")
+                    info  = strip_ansi(xml_get_text(msg, ".//Props/S[@N='Message']", ""))
                     endl  = xml_get_text(msg, ".//Props/B[@N='NoNewLine']", "false") == "false"
                     yield {"info": info, "endl": "\n" if endl else ""}
                 elif msg_type == PIPELINE_STATE:
                     state = int(xml_get_text(msg, ".//I32[@N='PipelineState']"))
                     if state in (3, 5, 6):
-                        yield {"error": xml_get_text(msg, ".//ToString", "")}
+                        yield {"error": strip_ansi(xml_get_text(msg, ".//ToString", ""))}
                 elif msg_type == PROGRESS_RECORD:
-                    status   = xml_get_text(msg, ".//S[@N='StatusDescription']", "")
-                    activity = xml_get_text(msg, ".//S[@N='Activity']", "")
+                    status   = strip_ansi(xml_get_text(msg, ".//S[@N='StatusDescription']", ""))
+                    activity = strip_ansi(xml_get_text(msg, ".//S[@N='Activity']", ""))
                     yield {"progress": status or activity}
             if rsp["state"].endswith("CommandState/Done"):
                 break

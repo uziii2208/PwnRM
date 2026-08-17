@@ -38,6 +38,24 @@ def utfstr(s):
     except:
         return s
 
+# ── terminal output sanitizer ────────────────────────────────────────────────
+_ANSI_RE = re.compile(
+    r'\x1b'
+    r'(?:'
+    r'\[[\x20-\x3f]*[\x40-\x7e]'                      # CSI  — ESC [ ... final
+    r'|\](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\)'  # OSC  — ESC ] ... BEL/ST
+    r'|P(?:[^\x1b]|\x1b(?!\\))*(?:\x1b\\)'            # DCS  — ESC P ... ST
+    r'|[NOno78MNPX^_c\\]'                              # Fe single-char sequences
+    r'|[\x40-\x5f]'                                    # other Fe sequences
+    r')'
+)
+_CTRL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
+def strip_ansi(s: str) -> str:
+    """Strip ANSI/VT100 escape sequences and dangerous control chars.
+    Preserves \\t (\\x09), \\n (\\x0a), \\r (\\x0d) for normal formatting."""
+    return _CTRL_RE.sub('', _ANSI_RE.sub('', s))
+
 zero_uuid = str(uuid.UUID(bytes_le=bytes(16))).upper()
 
 
