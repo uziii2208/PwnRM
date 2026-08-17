@@ -121,16 +121,34 @@ def load_pfx(pfx_path: str, password: str | None = None) -> tuple[str, str]:
     """
     Converts a PKCS#12 (.pfx) to a pair of temporary PEM files.
     Returns (cert_pem_path, key_pem_path).
-    Caller should delete the temp files when done.
+
+    Security: files are created inside a chmod-700 temp directory using
+    O_CREAT|O_EXCL to prevent TOCTOU races; key file has mode 0o600.
+    Caller must delete the temp directory (and its contents) when done.
+    Use atexit or a try/finally to guarantee cleanup.
     """
+    import stat
     pwd = password.encode() if password else None
     with open(pfx_path, "rb") as f:
         data = f.read()
     key, cert, chain = load_key_and_certificates(data, pwd)
     cert_pem = cert.public_bytes(Encoding.PEM)
     key_pem  = key.private_bytes(Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption())
-    tf_cert = tempfile.NamedTemporaryFile(suffix="_pwnrm_cert.pem", delete=False)
-    tf_key  = tempfile.NamedTemporaryFile(suffix="_pwnrm_key.pem",  delete=False)
-    tf_cert.write(cert_pem); tf_cert.close()
-    tf_key.write(key_pem);   tf_key.close()
-    return tf_cert.name, tf_key.name
+
+    # Create an isolated temp directory accessible only by this user
+    tmp_dir = tempfile.mkdtemp(prefix="pwnrm_")
+    os.chmod(tmp_dir, stat.S_IRWXU)   # 0o700 — owner only
+
+    cert_path = os.path.join(tmp_dir, "cert.pem")
+    key_path  = os.path.join(tmp_dir, "key.pem")
+
+    # O_CREAT | O_EXCL prevents a race between creation and write;
+    # mode 0o600 ensures no other user can read the private key.
+    for path, content in ((cert_path, cert_pem), (key_path, key_pem)):
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, content)
+        finally:
+            os.close(fd)
+
+    return cert_path, key_path

@@ -5,9 +5,11 @@ core.runspace — MS-PSRP Runspace (command execution layer)
 import uuid, logging
 from base64 import b64decode
 from struct import pack, unpack
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
+import xml.etree.ElementTree as _ET_std  # used only for tostring() / building outbound XML
 
 from .utils import utfstr, b64str, strip_ansi
+
 from .psrp  import (
     soap_req, soap_ns, xml_get_text, xml_get_attrib,
     ps_capability, ps_runspace_pool, ps_create_pipeline, ps_command,
@@ -107,7 +109,10 @@ class Runspace:
             return self._post(req)
 
     def _post(self, req):
-        rsp    = ET.fromstring(self.transport.send(ET.tostring(req, encoding="utf8")))
+        # tostring() builds outbound XML — use stdlib ET (safe, we control the data)
+        # fromstring() parses inbound server XML — ET is aliased to defusedxml (XXE-safe)
+        rsp    = ET.fromstring(self.transport.send(_ET_std.tostring(req, encoding="utf8")))
+
         action = rsp.find("./s:Header/wsa:Action", soap_ns).text
         if action.endswith("wsman/fault"):
             return {
@@ -172,6 +177,10 @@ class Runspace:
             out += pack(">BQI", 0b11, 0, len(data)) + data
         return out
 
+    # ── MS-PSRP fragment buffer security limits ──────────────────────────────
+    _MAX_FRAGMENT_KEYS  = 256             # max concurrent in-flight object IDs
+    _MAX_FRAGMENT_BYTES = 32 * 1024 * 1024  # 32 MB total buffer cap
+
     def _defragment(self, streams):
         for data in streams:
             if len(data) < 21: continue
@@ -180,11 +189,35 @@ class Runspace:
             obj_id, runspace_id_raw, msg_type = unpack("<QQI", payload[:20])
             xml_data = payload[20 + 32:]
             buf = self.fragment_buffer
+
+            # SECURITY CRIT-02: cap the number of concurrent in-flight object IDs
+            if obj_id not in buf:
+                if len(buf) >= self._MAX_FRAGMENT_KEYS:
+                    logging.warning(
+                        "_defragment: fragment_buffer key cap (%d) exceeded — "
+                        "possible rogue server; discarding fragment",
+                        self._MAX_FRAGMENT_KEYS,
+                    )
+                    continue
             buf.setdefault(obj_id, b"")
             buf[obj_id] += xml_data
+
+            # SECURITY CRIT-02: cap total accumulated buffer size
+            total_buffered = sum(len(v) for v in buf.values())
+            if total_buffered > self._MAX_FRAGMENT_BYTES:
+                logging.warning(
+                    "_defragment: fragment buffer exceeded %d bytes — "
+                    "possible rogue server; clearing buffer",
+                    self._MAX_FRAGMENT_BYTES,
+                )
+                buf.clear()
+                continue
+
             if flags & 0b01:
+                # ET is aliased to defusedxml.ElementTree (see module imports)
+                # which blocks XXE / entity expansion from server-controlled XML.
                 try:
-                    msg = ET.fromstring(buf.pop(obj_id).decode("utf-8","replace"))
+                    msg = ET.fromstring(buf.pop(obj_id).decode("utf-8", "replace"))
                     yield msg_type, msg
                 except ET.ParseError as e:
-                    logging.debug(f"XML parse error in fragment: {e}")
+                    logging.debug(f"XML parse error in fragment: {e}")

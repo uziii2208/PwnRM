@@ -82,13 +82,15 @@ def create_transport(args) -> "Transport":
 
     # 1. Client certificate (.pfx)
     if getattr(args, "pfx", None):
-        import atexit, os as _os
-        cert_pem, key_pem = load_pfx(args.pfx, getattr(args,"pfx_pass","") or None)
+        import atexit, os as _os, shutil as _shutil
+        cert_pem, key_pem = load_pfx(args.pfx, getattr(args, "pfx_pass", "") or None)
         logging.info(f"[+] Using client-cert transport ({args.pfx})")
-        atexit.register(lambda c=cert_pem, k=key_pem: [
-            _os.unlink(p) for p in (c, k) if _os.path.exists(p)
-        ])
+        # load_pfx() stores both PEM files in a dedicated temp dir;
+        # remove the entire directory on exit to ensure no key material lingers on disk.
+        _tmp_dir = _os.path.dirname(cert_pem)
+        atexit.register(lambda d=_tmp_dir: _shutil.rmtree(d, ignore_errors=True))
         return ClientCertTransport(url, cert_pem, key_pem)
+
 
     # 2. Kerberos (ccache)
     if getattr(args, "kerberos", False):

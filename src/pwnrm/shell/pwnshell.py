@@ -449,6 +449,50 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
     def _pse(path) -> str:
         """Escape single quotes for safe PS single-quoted string embedding."""
         return str(path).replace("'", "''")
+
+    @staticmethod
+    def _pde(path) -> str:
+        """
+        Escape a path for embedding inside a PowerShell double-quoted string.
+        Escapes: backtick (must be first), dollar sign, double-quote.
+        [CRIT-01] Prevents command injection when server-controlled paths are
+        placed inside double-quoted PS strings (e.g. Copy-Item "...\\$d").
+        """
+        s = str(path)
+        s = s.replace('`', '``')   # backtick first — PS escape character
+        s = s.replace('$', '`$')   # prevent variable/subexpression expansion
+        s = s.replace('"', '`"')   # prevent string termination
+        return s
+
+    # ── safe Windows path validator ───────────────────────────────────────────
+    import re as _re
+    _SAFE_WIN_PATH_RE = _re.compile(
+        r'^[A-Za-z]:[\\\/][^\x00-\x1f"$`|&;<>{}()]*$'
+    )
+
+    @classmethod
+    def _validate_remote_path(cls, path: str) -> str:
+        """
+        Validates a raw path string returned from the remote WinRM server
+        before it is embedded into any local PowerShell string context.
+
+        [HIGH-01] A malicious WinRM server can return a Resolve-Path response
+        containing PS-injection characters. This method whitelists the path to
+        a strict 'drive-letter:\\rest' pattern, blocking any special characters
+        that could break out of PS string embedding.
+
+        Raises ValueError with a clear message so callers can surface it to
+        the operator instead of silently executing injected code.
+        """
+        stripped = path.strip()
+        if not cls._SAFE_WIN_PATH_RE.match(stripped):
+            raise ValueError(
+                f"Remote path failed safety validation: {stripped!r}\n"
+                "  The WinRM server returned a path containing unsafe characters.\n"
+                "  This may indicate a malicious or compromised target."
+            )
+        return stripped
+
     # ── !download ─────────────────────────────────────────────────────────────
     def download(self, cmdline):
         args = split_args(cmdline)
@@ -465,11 +509,22 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             safe_filename = "downloaded_file"
 
         # Giữ nguyên logic query server để lấy đường dẫn thật (dùng cho logging và check directory)
-        src = self.run_sync(f"Resolve-Path -LiteralPath '{self._pse(args[0])}' | Select -Expand Path")
-        if not src:
+        src_raw = self.run_sync(f"Resolve-Path -LiteralPath '{self._pse(args[0])}' | Select -Expand Path")
+        if not src_raw:
             self.write_warning(f"{args[0]} not found on remote"); return
-        src = PureWindowsPath(src.strip())
-        src_ps = self._pse(src)   # escaped version dùng cho tất cả PS embedding bên dưới
+
+        # [HIGH-01] Validate the server-returned path against a strict whitelist before
+        # embedding it into any PS string. Rejects paths with injection characters
+        # ($, `, ", |, &, etc.) that could break out of PS string context.
+        try:
+            src_validated = self._validate_remote_path(src_raw)
+        except ValueError as e:
+            self.write_error(str(e)); return
+
+        src    = PureWindowsPath(src_validated)
+        src_ps = self._pse(src)   # for single-quoted PS strings
+        src_pde = self._pde(src)  # [CRIT-01] for double-quoted PS string context
+
         
         # [GHSA-x4cv-p53p-wh3w - SECURITY FIX 2] Build đường dẫn local dựa trên safe_filename thay vì src.name
         dst = Path(args[1]) if len(args) == 2 else Path(safe_filename)
@@ -491,9 +546,12 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
                 dst = dst.parent / f"{dst.name}.zip"
                 
             self.write_info(f"  [~] Directory → ZIP download: {c(C,str(dst))}")
-            tmpdir = self._pse(self.run_sync("[System.IO.Path]::GetTempPath()").strip())
-            tmpnm  = randbytes(8).hex()
-            tmpfn  = tmpdir + tmpnm
+            tmpdir    = self._pse(self.run_sync("[System.IO.Path]::GetTempPath()").strip())
+            tmpnm     = randbytes(8).hex()
+            tmpfn     = tmpdir + tmpnm
+            # [CRIT-01] tmpfn is embedded in a double-quoted PS string below;
+            # _pde() escapes $, ` and " to prevent injection from a rogue GetTempPath response.
+            tmpfn_pde = self._pde(tmpdir + tmpnm)
             ps = f"""
 Add-Type -AssemblyName "System.IO.Compression.FileSystem"
 New-Item -Path '{tmpdir}' -ItemType Directory -Name '{tmpnm}' | Out-Null
@@ -501,7 +559,7 @@ Get-ChildItem -Force -Recurse -Path '{src_ps}' | ForEach-Object {{
     if(-not ($_.FullName -Like "*{tmpnm}*")) {{
         try {{
             $d = $_.FullName.Replace('{src_ps}', '')
-            Copy-Item -ErrorAction SilentlyContinue -Force $_.FullName "{tmpfn}\\$d"
+            Copy-Item -ErrorAction SilentlyContinue -Force $_.FullName "{tmpfn_pde}\\$d"
         }} catch {{ Write-Warning "skipping $d" }}
     }}
 }}
