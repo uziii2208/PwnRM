@@ -75,6 +75,7 @@ class Transport:
         self.url     = url
         self.ssl     = urlparse(url).scheme == "https"
         self.session = Session()
+        self.session.max_redirects = 0   # SECURITY: WinRM never redirects; block SSRF
         self.session.verify = False
         self.session.headers["User-Agent"]      = SKIP_HEADER
         self.session.headers["Accept-Encoding"] = SKIP_HEADER
@@ -84,13 +85,20 @@ class Transport:
         if rsp.status_code == 401:
             self._auth()
             rsp = self._send(req)
+        if rsp.status_code in (301, 302, 303, 307, 308):
+            raise TransportError(
+                f"Unexpected HTTP redirect ({rsp.status_code}) to "
+                f"{rsp.headers.get('Location', '?')} — "
+                "WinRM does not support redirects (possible SSRF attempt)"
+            )
         if rsp.status_code not in (200, 500):
             raise TransportError(f"Unexpected HTTP {rsp.status_code}")
         return rsp.content
 
     def _send_auth(self, req, proto, phase=""):
         rsp      = self.session.post(self.url,
-                                     headers={"Authorization": f"{proto} {b64str(req)}"})
+                                     headers={"Authorization": f"{proto} {b64str(req)}"},
+                                     allow_redirects=False)
         www_auth = rsp.headers.get("WWW-Authenticate","")
         if rsp.status_code == 200 and not www_auth:
             return b""
@@ -117,6 +125,9 @@ class Transport:
 
     def _decrypted_response(self, rsp, unwrap_fn):
         if rsp.status_code not in (200, 500):
+            return rsp
+        # If response is not encrypted (e.g. plaintext SOAP fault), return raw
+        if b"--Encrypted Boundary" not in rsp.content:
             return rsp
         pref_space = b"\r\nContent-Type: application/octet-stream\r\n"
         pref_tab   = b"\r\n\tContent-Type: application/octet-stream\r\n"
@@ -149,7 +160,8 @@ class BasicTransport(Transport):
         self.session.auth = (username, password)
     def _send(self, req):
         return self.session.post(self.url, data=req,
-                                 headers={"Content-Type":"application/soap+xml;charset=UTF-8"})
+                                 headers={"Content-Type":"application/soap+xml;charset=UTF-8"},
+                                 allow_redirects=False)
     def _auth(self): pass
 
 
@@ -167,7 +179,8 @@ class ClientCertTransport(Transport):
             "http://schemas.dmtf.org/wbem/wsman/1/wsman/secprofile/https/mutual"
     def _send(self, req):
         return self.session.post(self.url, data=req,
-                                 headers={"Content-Type":"application/soap+xml;charset=UTF-8"})
+                                 headers={"Content-Type":"application/soap+xml;charset=UTF-8"},
+                                 allow_redirects=False)
     def _auth(self): pass
 
 
@@ -259,6 +272,8 @@ class CredSSPTransport(Transport):
             else:
                 break
         cert   = self.tls_obj.getpeercert(True)
+        if not cert:
+            raise TransportError("CredSSP: TLS handshake incomplete — no server certificate received")
         pubkey = x509.load_der_x509_certificate(cert).public_key()
         pubkey = pubkey.public_bytes(Encoding.DER, PublicFormat.PKCS1)
         nonce  = randbytes(32)

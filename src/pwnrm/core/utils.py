@@ -111,7 +111,8 @@ def load_kerberos_ccache(ccache_path: str | None = None):
     Returns (domain, username, ticket, tgskey) from a .ccache file or
     the KRB5CCNAME environment variable.  Raises FileNotFoundError if not found.
     """
-    path = ccache_path or os.environ.get("KRB5CCNAME", "").lstrip("FILE:")
+    raw_path = ccache_path or os.environ.get("KRB5CCNAME", "")
+    path = raw_path.removeprefix("FILE:") if raw_path.startswith("FILE:") else raw_path
     if not path or not Path(path).exists():
         raise FileNotFoundError(f"ccache not found: {path!r}")
     cc     = CCache.loadFile(path)
@@ -140,6 +141,10 @@ def load_pfx(pfx_path: str, password: str | None = None) -> tuple[str, str]:
     with open(pfx_path, "rb") as f:
         data = f.read()
     key, cert, chain = load_key_and_certificates(data, pwd)
+    if key is None or cert is None:
+        raise ValueError(
+            f"PFX file {pfx_path!r} must contain both a private key and a certificate"
+        )
     cert_pem = cert.public_bytes(Encoding.PEM)
     key_pem  = key.private_bytes(Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption())
 
