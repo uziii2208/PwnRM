@@ -2,7 +2,7 @@
 shell.pwnshell — PwnShell interactive shell
 """
 
-import os, sys, logging, time, textwrap
+import os, sys, logging, time, textwrap, stat
 from pathlib import PureWindowsPath, Path
 from ipaddress import ip_address
 from base64 import b64decode
@@ -47,12 +47,14 @@ from .commands import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Session data directory ────────────────────────────────────────────────────
-# [BUG-01 FIX] _PWNRM_DIR was undefined everywhere in the codebase — caused an
-# immediate NameError crash on any TTY session (FileHistory in __init__) and
-# whenever the operator called !log (start_log). Supports PWNRM_DIR env-var
-# override so operators can redirect logs/history to a custom path.
+# [BUG-01 & NICHE-01 FIX] Enforce 0o700 permission on _PWNRM_DIR so other local
+# users cannot read command history or transcript logs containing credentials.
 _PWNRM_DIR = Path(os.environ.get("PWNRM_DIR", str(Path.home() / ".pwnrm")))
 _PWNRM_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(_PWNRM_DIR, stat.S_IRWXU)
+except OSError:
+    pass
 
 # ── PwnShell ──────────────────────────────────────────────────────────────────
 class PwnShell:
@@ -81,7 +83,9 @@ class PwnShell:
         if not self.stdout_log:
             fn = str(_PWNRM_DIR / f"pwnrm_{int(time.time())}_stdout.log")
             self.write_info(f"Logging to {c(C, fn)}")
-            self.stdout_log = open(fn, "wb")
+            flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND
+            fd = os.open(fn, flags, 0o600)
+            self.stdout_log = os.fdopen(fd, "wb")
 
     def stop_log(self):
         if self.stdout_log:
@@ -620,14 +624,11 @@ Remove-Item Function:Download-Remote
         self.run_with_interrupt(ps, collect)
 
         if is_dir: self.run_sync(f"Remove-Item -fo '{src_ps}'")
-        # [BUG-02 FIX] Guard against empty/truncated response before slicing buf.
-        # Without this, an empty buf produces a misleading error; worse, a rogue
-        # server that returns exactly the 32-byte MD5(empty) string passes the
-        # integrity check → silent write of a 0-byte file.
-        if len(buf) < 33:
+        # [BUG-02 FIX] Guard against truncated response (< 32 bytes MD5 trailer).
+        if len(buf) < 32:
             self.write_error(
                 f"  Download failed: server returned {len(buf)} bytes "
-                "(expected file data + 32-byte MD5 trailer)."
+                "(expected at least 32-byte MD5 trailer)."
             )
             return
         if buf[-32:] != MD5.new(buf[:-32]).hexdigest().upper().encode():

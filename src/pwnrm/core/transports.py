@@ -135,6 +135,7 @@ class Transport:
                 plaintext += unwrap_fn(part[4:4+sig_len], part[4+sig_len:])
             except Exception as e:
                 logging.debug(f"Decrypt part {i}: {e}")
+                raise TransportError(f"Transport decryption failure: {e}") from e
         rsp.headers["Content-Type"]   = "application/soap+xml;charset=UTF-8"
         rsp.headers["Content-Length"] = str(len(plaintext))
         rsp._content = plaintext
