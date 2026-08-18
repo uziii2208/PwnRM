@@ -73,9 +73,11 @@ class PwnShell:
 
         if _PTK:
             hist_path = _PWNRM_DIR / ".pwnrm_history"
+            if hist_path.is_symlink():
+                hist_path.unlink()
             if not hist_path.exists():
                 try:
-                    fd = os.open(str(hist_path), os.O_CREAT | os.O_WRONLY, 0o600)
+                    fd = os.open(str(hist_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                     os.close(fd)
                 except OSError:
                     pass
@@ -93,9 +95,9 @@ class PwnShell:
     # ── logging ───────────────────────────────────────────────────────────────
     def start_log(self):
         if not self.stdout_log:
-            fn = str(_PWNRM_DIR / f"pwnrm_{int(time.time())}_stdout.log")
+            fn = str(_PWNRM_DIR / f"pwnrm_{int(time.time())}_{randbytes(4).hex()}_stdout.log")
             self.write_info(f"Logging to {c(C, fn)}")
-            flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_APPEND
             fd = os.open(fn, flags, 0o600)
             self.stdout_log = os.fdopen(fd, "wb")
 
