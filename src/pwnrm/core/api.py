@@ -17,7 +17,7 @@ from .utils       import load_kerberos_ccache, load_pfx
 def argument_parser():
     parser = ArgumentParser(
         prog="pwnrm",
-        description="PwnRM v1.1.0 — Advanced WinRM / AD post-exploitation shell",
+        description="PwnRM v1.1.1 — Advanced WinRM / AD post-exploitation shell",
         epilog="Example: pwnrm -u Administrator -p 'P@ss1' 192.168.1.10\n"
                "         pwnrm -u user@DOMAIN -k --ccache /tmp/user.ccache dc01.domain.local\n"
                "         pwnrm -u user@DOMAIN --pfx user.pfx --pfx-pass secret https://dc01:5986",

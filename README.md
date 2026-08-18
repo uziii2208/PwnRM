@@ -29,7 +29,7 @@ pip install pwnrm
 
 # Update when we have new release
 # (highly recommend when we have critical issue at previous version)
-# Currently version: 1.1.0
+# Currently version: 1.1.1
 pip install --upgrade pwnrm
 ```
 
