@@ -329,7 +329,7 @@ class CredSSPTransport(Transport):
         self.tls_obj.write(data)
         enc             = self.tls_out.read()
         cipher, proto, _ = self.tls_obj.cipher()
-        tl              = tls_trailer_length(len(enc), proto, cipher)
+        tl              = tls_trailer_length(len(data), proto, cipher)
         return enc[:tl], enc[tl:]
 
     def _unwrap(self, sig, data):

