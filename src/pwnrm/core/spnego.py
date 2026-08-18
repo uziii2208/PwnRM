@@ -49,6 +49,9 @@ class SPNEGOProxyNTLM:
             init["MechTypes"] = [TypesMech["NTLMSSP - Microsoft NTLM Security Support Provider"]]
             init["MechToken"] = self._type1.getData()
             return init.getData()
+        if not data_in:
+            self.complete = True
+            return b""
         try:
             targ      = SPNEGO_NegTokenResp(data_in)
             neg_state = targ["NegState"][0]

@@ -54,7 +54,9 @@ _CTRL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 def strip_ansi(s: str) -> str:
     """Strip ANSI/VT100 escape sequences and dangerous control chars.
     Preserves \\t (\\x09), \\n (\\x0a), \\r (\\x0d) for normal formatting."""
-    return _CTRL_RE.sub('', _ANSI_RE.sub('', s))
+    if s is None:
+        return ""
+    return _CTRL_RE.sub('', _ANSI_RE.sub('', str(s)))
 
 zero_uuid = str(uuid.UUID(bytes_le=bytes(16))).upper()
 
@@ -71,13 +73,19 @@ def krb5_mech_indep_token_encode(oid, data):
     return b"\x60" + size + payload
 
 def krb5_mech_indep_token_decode(data):
-    skip = 2 + (data[1] if data[1] < 128 else (data[1] - 128))
+    if len(data) < 2:
+        raise ValueError("Token too short for GSS-API framing")
+    if data[1] < 128:
+        skip = 2
+    else:
+        skip = 2 + (data[1] - 128)
     return decoder.decode(data[skip:], asn1Spec=ObjectIdentifier())
 
 
 # ── TLS helpers ──────────────────────────────────────────────────────────────
 def get_server_certificate(url):
-    addr = (urlparse(url).hostname, urlparse(url).port or 443)
+    default_port = 5986 if urlparse(url).scheme == "https" else 5985
+    addr = (urlparse(url).hostname, urlparse(url).port or default_port)
     cert = ssl.get_server_certificate(addr)
     cert = cert.replace("-----BEGIN CERTIFICATE-----\n", "")
     cert = cert.replace("-----END CERTIFICATE-----\n", "")

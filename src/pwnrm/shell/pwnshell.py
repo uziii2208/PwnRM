@@ -72,7 +72,19 @@ class PwnShell:
         self.cmd_count   = 0
 
         if _PTK:
-            self.prompt_history = FileHistory(str(_PWNRM_DIR / ".pwnrm_history"))
+            hist_path = _PWNRM_DIR / ".pwnrm_history"
+            if not hist_path.exists():
+                try:
+                    fd = os.open(str(hist_path), os.O_CREAT | os.O_WRONLY, 0o600)
+                    os.close(fd)
+                except OSError:
+                    pass
+            else:
+                try:
+                    os.chmod(str(hist_path), stat.S_IRUSR | stat.S_IWUSR)
+                except OSError:
+                    pass
+            self.prompt_history = FileHistory(str(hist_path))
             self._completer = WordCompleter(_COMPLETIONS, ignore_case=True)
 
     def __del__(self):
@@ -450,7 +462,12 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
         except IOError as e:
             self.write_error(str(e)); return
 
-        tmpfn = self._pse(self.run_sync("[IO.Path]::GetTempPath()").strip()) + randbytes(8).hex() + ".tmp"
+        temp_raw = self.run_sync("[IO.Path]::GetTempPath()").strip()
+        try:
+            temp_validated = self._validate_remote_path(temp_raw)
+        except ValueError:
+            temp_validated = "C:\\Windows\\Temp\\"
+        tmpfn = self._pse(temp_validated) + randbytes(8).hex() + ".tmp"
         total = 0
         self.write_info(f"  [~] Uploading → {c(C,str(tmpfn))}")
         self.run_sync(import_XorEnc)
@@ -571,8 +588,12 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             if not dst.name.lower().endswith(".zip"): 
                 dst = dst.parent / f"{dst.name}.zip"
                 
-            self.write_info(f"  [~] Directory → ZIP download: {c(C,str(dst))}")
-            tmpdir    = self._pse(self.run_sync("[System.IO.Path]::GetTempPath()").strip())
+            tmpdir_raw = self.run_sync("[System.IO.Path]::GetTempPath()").strip()
+            try:
+                tmpdir_validated = self._validate_remote_path(tmpdir_raw)
+            except ValueError:
+                tmpdir_validated = "C:\\Windows\\Temp\\"
+            tmpdir    = self._pse(tmpdir_validated)
             tmpnm     = randbytes(8).hex()
             tmpfn     = tmpdir + tmpnm
             # [CRIT-01] tmpfn is embedded in a double-quoted PS string below;

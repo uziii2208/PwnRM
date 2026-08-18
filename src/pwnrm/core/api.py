@@ -69,14 +69,23 @@ def create_transport(args) -> "Transport":
        3. --credssp        → CredSSPTransport       (full cred delegation)
        4. default          → SPNEGOTransport        (NTLM or Kerberos via SPNEGO)
     """
-    domain, username, password, host = parse_target(args.target)
+    target_clean = args.target
+    if target_clean.startswith("http://") or target_clean.startswith("https://"):
+        u = urlparse(target_clean)
+        host = u.hostname or ""
+        domain, username, password = "", u.username or "", u.password or ""
+        target_port = u.port
+    else:
+        domain, username, password, host = parse_target(target_clean)
+        target_port = None
+
     if args.domain:   domain   = args.domain
     if args.username: username = args.username
     if args.password: password = args.password
 
     use_ssl = args.ssl or (args.port == 5986) or \
               (urlparse(args.target).scheme == "https")
-    port    = args.port or (5986 if use_ssl else 5985)
+    port    = args.port or target_port or (5986 if use_ssl else 5985)
     scheme  = "https" if use_ssl else "http"
     url     = f"{scheme}://{host}:{port}/wsman"
 

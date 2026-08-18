@@ -101,7 +101,7 @@ class Runspace:
                     status   = strip_ansi(xml_get_text(msg, ".//S[@N='StatusDescription']", ""))
                     activity = strip_ansi(xml_get_text(msg, ".//S[@N='Activity']", ""))
                     yield {"progress": status or activity}
-            if rsp["state"].endswith("CommandState/Done"):
+            if rsp["state"].endswith(("CommandState/Done", "CommandState/Terminated", "CommandState/Failed")):
                 break
         self.command_id = None
 
@@ -118,12 +118,10 @@ class Runspace:
         # fromstring() parses inbound server XML — ET is aliased to defusedxml (XXE-safe)
         rsp    = ET.fromstring(self.transport.send(_ET_std.tostring(req, encoding="utf8")))
 
-        # [BUG-09 FIX] Validate wsa:Action existence to prevent AttributeError on malformed SOAP responses
+        # Check for SOAP fault directly or via Action header
         action_el = rsp.find("./s:Header/wsa:Action", soap_ns)
-        if action_el is None or not action_el.text:
-            raise RuntimeError("Invalid WSMan response: missing wsa:Action header")
-        action = action_el.text
-        if action.endswith("wsman/fault"):
+        action    = action_el.text if (action_el is not None and action_el.text) else ""
+        if action.endswith("wsman/fault") or rsp.find(".//s:Fault", soap_ns) is not None:
             return {
                 "fault":   "ok",
                 "subcode": xml_get_text(rsp, ".//s:Subcode/s:Value", ""),
@@ -211,6 +209,8 @@ class Runspace:
                         self._MAX_FRAGMENT_KEYS,
                     )
                     continue
+            if flags & 0b10:
+                buf[obj_id] = b""
             buf.setdefault(obj_id, b"")
             buf[obj_id] += xml_data
 

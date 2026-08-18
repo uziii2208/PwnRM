@@ -284,7 +284,15 @@ class CredSSPTransport(Transport):
             srv_expected = SHA256.new(
                 b"CredSSP Server-To-Client Binding Hash\x00" + nonce + pubkey
             ).digest()
-            if bytes(tsrsp2["pubKeyAuth"]) != srv_expected:
+            raw_pubkey_auth = tsrsp2["pubKeyAuth"].asOctets()
+            sig_len = 16
+            if len(raw_pubkey_auth) < sig_len:
+                raise TransportError("CredSSP: malformed pubKeyAuth token from server")
+            try:
+                unwrapped_auth = proxy.unwrap(raw_pubkey_auth[:sig_len], raw_pubkey_auth[sig_len:])
+            except Exception as e:
+                raise TransportError(f"CredSSP: failed to verify server pubKeyAuth: {e}") from e
+            if unwrapped_auth != srv_expected:
                 raise TransportError(
                     "CredSSP: server pubKeyAuth mismatch — possible MitM, aborting!"
                 )
