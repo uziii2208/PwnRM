@@ -89,7 +89,12 @@ class Runspace:
                     endl  = xml_get_text(msg, ".//Props/B[@N='NoNewLine']", "false") == "false"
                     yield {"info": info, "endl": "\n" if endl else ""}
                 elif msg_type == PIPELINE_STATE:
-                    state = int(xml_get_text(msg, ".//I32[@N='PipelineState']"))
+                    # [BUG-10 FIX] Safely parse PIPELINE_STATE to avoid TypeError/ValueError on malformed responses
+                    state_txt = xml_get_text(msg, ".//I32[@N='PipelineState']")
+                    try:
+                        state = int(state_txt) if state_txt is not None else 0
+                    except ValueError:
+                        state = 0
                     if state in (3, 5, 6):
                         yield {"error": strip_ansi(xml_get_text(msg, ".//ToString", ""))}
                 elif msg_type == PROGRESS_RECORD:
@@ -113,7 +118,11 @@ class Runspace:
         # fromstring() parses inbound server XML — ET is aliased to defusedxml (XXE-safe)
         rsp    = ET.fromstring(self.transport.send(_ET_std.tostring(req, encoding="utf8")))
 
-        action = rsp.find("./s:Header/wsa:Action", soap_ns).text
+        # [BUG-09 FIX] Validate wsa:Action existence to prevent AttributeError on malformed SOAP responses
+        action_el = rsp.find("./s:Header/wsa:Action", soap_ns)
+        if action_el is None or not action_el.text:
+            raise RuntimeError("Invalid WSMan response: missing wsa:Action header")
+        action = action_el.text
         if action.endswith("wsman/fault"):
             return {
                 "fault":   "ok",
@@ -122,9 +131,10 @@ class Runspace:
                 "detail":  xml_get_text(rsp, ".//s:Detail/s:Message", ""),
             }
         elif action.endswith("shell/ReceiveResponse"):
+            # [BUG-08 FIX] Guard against empty <rsp:Stream/> elements where s.text is None
             return {
                 "receive": "ok",
-                "streams": [b64decode(s.text) for s in rsp.findall(".//rsp:Stream", soap_ns)],
+                "streams": [b64decode(s.text or "") for s in rsp.findall(".//rsp:Stream", soap_ns)],
                 "state":   xml_get_attrib(rsp, ".//rsp:CommandState", "State", ""),
             }
         elif action.endswith("transfer/CreateResponse"):
@@ -183,7 +193,9 @@ class Runspace:
 
     def _defragment(self, streams):
         for data in streams:
-            if len(data) < 21: continue
+            # [BUG-07 FIX] Require at least 65 bytes (13 byte header + 20 byte payload prefix + 32 byte UUIDs)
+            # to prevent struct.error when slicing payload[:20] on short/malformed streams
+            if len(data) < 65: continue
             flags, frag_id, length = unpack(">BQI", data[:13])
             payload  = data[13:]
             obj_id, runspace_id_raw, msg_type = unpack("<QQI", payload[:20])
