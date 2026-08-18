@@ -46,6 +46,14 @@ from .commands import (
 #  KHÔNG THAY ĐỔI BẤT KỲ LOGIC NÀO BÊN TRONG CLASS
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Session data directory ────────────────────────────────────────────────────
+# [BUG-01 FIX] _PWNRM_DIR was undefined everywhere in the codebase — caused an
+# immediate NameError crash on any TTY session (FileHistory in __init__) and
+# whenever the operator called !log (start_log). Supports PWNRM_DIR env-var
+# override so operators can redirect logs/history to a custom path.
+_PWNRM_DIR = Path(os.environ.get("PWNRM_DIR", str(Path.home() / ".pwnrm")))
+_PWNRM_DIR.mkdir(parents=True, exist_ok=True)
+
 # ── PwnShell ──────────────────────────────────────────────────────────────────
 class PwnShell:
 
@@ -361,6 +369,8 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
     # ── !netrun ───────────────────────────────────────────────────────────────
     def netrun(self, cmdline):
         args = split_args(cmdline)
+        if not args:
+            self.write_warning("usage: !netrun [-xor] URL [ARG..]"); return
         if args[0].lower() == "-xor":
             if len(args) == 1:
                 self.write_warning("usage: !netrun [-xor] URL [ARG..]"); return
@@ -413,6 +423,8 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
     # ── !upload ───────────────────────────────────────────────────────────────
     def upload(self, cmdline):
         args = split_args(cmdline)
+        if not args:
+            self.write_warning("usage: !upload [-xor] LPATH [RPATH]"); return
         if args[0].lower() == "-xor":
             unxor = False; args = args[1:]
         else:
@@ -593,6 +605,16 @@ Remove-Item Function:Download-Remote
         self.run_with_interrupt(ps, collect)
 
         if is_dir: self.run_sync(f"Remove-Item -fo '{src_ps}'")
+        # [BUG-02 FIX] Guard against empty/truncated response before slicing buf.
+        # Without this, an empty buf produces a misleading error; worse, a rogue
+        # server that returns exactly the 32-byte MD5(empty) string passes the
+        # integrity check → silent write of a 0-byte file.
+        if len(buf) < 33:
+            self.write_error(
+                f"  Download failed: server returned {len(buf)} bytes "
+                "(expected file data + 32-byte MD5 trailer)."
+            )
+            return
         if buf[-32:] != MD5.new(buf[:-32]).hexdigest().upper().encode():
             self.write_error("  Download integrity check FAILED!")
             return
