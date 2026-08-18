@@ -345,6 +345,11 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
     # ── !psrun ────────────────────────────────────────────────────────────────
     def psrun(self, cmdline):
         args   = split_args(cmdline)[:2]
+        # [BUG-04 FIX] Guard empty args before any args[n] access.
+        # '!psrun ' (trailing space, no URL) yields args=[] -> IndexError.
+        # Same pattern fixed in netrun/upload; psrun was missed.
+        if not args:
+            self.write_warning("usage: !psrun [-xor] URL"); return
         url    = args[-1]
         xorfunc= ""
         if args[0].lower() == "-xor":
@@ -427,6 +432,11 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             self.write_warning("usage: !upload [-xor] LPATH [RPATH]"); return
         if args[0].lower() == "-xor":
             unxor = False; args = args[1:]
+            # [BUG-06 FIX] Guard empty args after -xor strip.
+            # '!upload -xor' (no LPATH) leaves args=[] -> IndexError on args[0].
+            # netrun() already had this guard (len==1 check); upload() did not.
+            if not args:
+                self.write_warning("usage: !upload [-xor] LPATH [RPATH]"); return
         else:
             unxor = True
         src = Path(args[0])
@@ -581,7 +591,12 @@ Get-ChildItem -Force -Recurse -Path '{src_ps}' | ForEach-Object {{
 Remove-Item -Recurse -Force -Path '{tmpfn}'
 """
             self.run_with_interrupt(ps, self.write_line)
-            src = tmpfn + ".zip"
+            src    = tmpfn + ".zip"
+            # [BUG-05 FIX] src was reassigned to the remote zip path but src_ps
+            # was never updated — Download-Remote would OpenRead the original
+            # directory (fails on Windows) and Remove-Item would delete the
+            # original directory instead of the zip temp file.
+            src_ps = self._pse(src)
 
         ps = f"""function Download-Remote {{
     $h = Get-FileHash '{src_ps}' -Algorithm MD5 | Select -Expand Hash;
