@@ -55,7 +55,7 @@ class SPNEGOProxyNTLM:
         try:
             targ      = SPNEGO_NegTokenResp(data_in)
             neg_state = targ["NegState"][0]
-        except:
+        except Exception:
             raise SPNEGOError("SPNEGO: bad response")
         if neg_state == 0:
             self.complete = True
@@ -154,7 +154,7 @@ class SPNEGOProxyKerberos:
         try:
             targ      = SPNEGO_NegTokenResp(data_in)
             neg_state = targ["NegState"][0]
-        except:
+        except Exception:
             raise SPNEGOError("Kerberos: unexpected response")
         if neg_state == 0:
             blob    = krb5_mech_indep_token_decode(targ["ResponseToken"])[1]

@@ -265,7 +265,7 @@ class CredSSPTransport(Transport):
         self.tls_obj = ctx.wrap_bio(self.tls_in, self.tls_out, server_side=False)
         while True:
             try: self.tls_obj.do_handshake()
-            except: pass
+            except Exception: pass
             if req := self.tls_out.read():
                 rsp = self._send_auth(req, "CredSSP", "tls handshake")
                 self.tls_in.write(rsp)

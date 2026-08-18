@@ -53,6 +53,16 @@ _PWNRM_DIR = Path(os.environ.get("PWNRM_DIR", str(Path.home() / ".pwnrm")))
 _PWNRM_DIR.mkdir(parents=True, exist_ok=True)
 try:
     os.chmod(_PWNRM_DIR, stat.S_IRWXU)
+    import platform
+    if platform.system() == "Windows":
+        import subprocess
+        user = os.environ.get("USERNAME")
+        if user:
+            subprocess.run(
+                ["icacls", str(_PWNRM_DIR), "/inheritance:r", "/grant", f"{user}:(OI)(CI)F"],
+                capture_output=True,
+                creationflags=0x08000000
+            )
 except OSError:
     pass
 
@@ -237,10 +247,19 @@ class PwnShell:
     def write_error(self, msg):   self.write_line({"error": msg})
     def write_progress(self, msg):self.write_line({"progress": msg})
 
-    def run_sync(self, cmd):
-        return "\n".join(
-            o.get("stdout","") for o in self.runspace.run_command(cmd) if "stdout" in o
-        )
+    def run_sync(self, cmd, max_bytes=1048576):  # [HIGH-05 FIX] 1MB cap for sync commands to prevent OOM
+        out = []
+        total = 0
+        for o in self.runspace.run_command(cmd):
+            if "stdout" in o:
+                chunk = o["stdout"]
+                if total + len(chunk) > max_bytes:
+                    out.append("\n[!] run_sync output truncated (exceeded max_bytes protection).")
+                    self.runspace.interrupt()
+                    break
+                out.append(chunk)
+                total += len(chunk)
+        return "\n".join(out)
 
     def run_with_interrupt(self, cmd, handler=None, exc_handler=None):
         stream = self.runspace.run_command(cmd)
@@ -639,12 +658,20 @@ Remove-Item Function:Download-Remote
 """
         self.write_info(f"  [~] Streaming {c(C,str(src))} ...")
         buf = bytearray()
+        # [HIGH-04 FIX] Enforce memory cap to prevent OOM DoS
+        max_bytes = int(os.environ.get("PWNRM_MAX_DL", 256 * 1024 * 1024))
 
         def collect(out):
             if part := out.get("stdout"):
                 try:
-                    buf.extend(b64decode(part))
+                    chunk = b64decode(part)
+                    if len(buf) + len(chunk) > max_bytes:
+                        raise RuntimeError(f"OOM guard: stream exceeds {max_bytes} bytes")
+                    buf.extend(chunk)
                     self.write_progress(f"Download {len(buf)} bytes")
+                except RuntimeError as e:
+                    self.write_error(str(e))
+                    raise e
                 except Exception:
                     self.write_warning("Received malformed Base64 chunk from server (skipped)")
 
