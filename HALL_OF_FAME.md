@@ -30,6 +30,7 @@ This page recognizes security researchers who have reported valid vulnerabilitie
 | Advisory ID | Severity | Vulnerability Type | Details | Reporter | Fixed In |
 |:-----------:|:--------:|:------------------:|:--------|:--------:|:--------:|
 | [GHSA-x4cv-p53p-wh3w](https://github.com/uziii2208/PwnRM/security/advisories/GHSA-x4cv-p53p-wh3w) | 🔴 **CRITICAL** (9.6) | **Remote Code Execution** via Arbitrary File Write | Malicious WinRM server could spoof `!download` destination path, allowing attacker-controlled content to be written to arbitrary locations on the operator's host (e.g., `~/.bashrc`, `~/.ssh/authorized_keys`), leading to full RCE on next shell/SSH session. | [@h4x0rc](https://github.com/h4x0rc) | **[v1.0.1](https://github.com/uziii2208/PwnRM/releases/tag/v1.0.1)** |
+| [GHSA-jwc5-6vfh-r4h2](https://github.com/uziii2208/PwnRM/security/advisories/GHSA-jwc5-6vfh-r4h2) | 🟠**HIGH** (7.4) | **Server-Side Request Forgery (SSRF)** | Malicious WinRM server could issue HTTP 307 redirect to arbitrary internal endpoints, causing PwnRM to forward operator requests to unintended services (e.g., AWS IMDS `/latest/meta-data/iam/`).| [@phamthanha-a](https://github.com/phamthanha-a) | **[Non-fix](https://github.com/uziii2208/PwnRM/releases/tag/)** |
 
 ---
 
@@ -60,6 +61,9 @@ Found a security issue in PwnRM? We welcome responsible disclosures:
 | **2026-08-15** | Vulnerability confirmed, triage initiated |
 | **2026-08-16** | Security patch developed and tested |
 | **2026-08-16** | **[v1.0.1](https://github.com/uziii2208/PwnRM/releases/tag/v1.0.1)** released with fix |
+| **2026-08-18** | **[GHSA-jwc5-6vfh-r4h2](https://github.com/uziii2208/PwnRM/security/advisories/GHSA-jwc5-6vfh-r4h2)** reported by [@phamthanha-a](https://github.com/phamthanha-a) |
+| **2026-08-18** | Vulnerability confirmed, triage initiated |
+| **2026-08-18** | Security patch developed and tested |
 
 ---
 
@@ -67,6 +71,6 @@ Found a security issue in PwnRM? We welcome responsible disclosures:
 
 **Thank you for helping keep the offensive security community safe.**
 
-*Last updated: 2026-08-16*
+*Last updated: 2026-08-18*
 
 </div>
