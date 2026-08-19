@@ -41,6 +41,9 @@ Mode                 LastWriteTime         Length Name
 ╚═╝      ╚══╝╚══╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝
   Advanced WinRM / AD Post-Exploitation Shell  vX.Y.Z
   github.com/uziii2208/PwnRM  ·  For authorized engagements only.
+...[snip]...
+
+(pwnrm_test) PS E:\PwnRM> Get-ChildItem -Path src -Filter "__pycache__" -Recurse -Directory | Remove-Item -Recurse -Force
 ```
 
 3. Final, publish into PyPI for new version

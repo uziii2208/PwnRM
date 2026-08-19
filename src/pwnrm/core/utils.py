@@ -87,8 +87,7 @@ def get_server_certificate(url):
     default_port = 5986 if urlparse(url).scheme == "https" else 5985
     addr = (urlparse(url).hostname, urlparse(url).port or default_port)
     cert = ssl.get_server_certificate(addr)
-    cert = cert.replace("-----BEGIN CERTIFICATE-----\n", "")
-    cert = cert.replace("-----END CERTIFICATE-----\n", "")
+    cert = re.sub(r"-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s+", "", cert)
     return b64decode(cert)
 
 def tls_trailer_length(data_length, protocol, cipher_suite):
@@ -136,7 +135,7 @@ def load_pfx(pfx_path: str, password: str | None = None) -> tuple[str, str]:
     Caller must delete the temp directory (and its contents) when done.
     Use atexit or a try/finally to guarantee cleanup.
     """
-    import stat
+    import stat, platform
     pwd = password.encode() if password else None
     with open(pfx_path, "rb") as f:
         data = f.read()
@@ -150,7 +149,17 @@ def load_pfx(pfx_path: str, password: str | None = None) -> tuple[str, str]:
 
     # Create an isolated temp directory accessible only by this user
     tmp_dir = tempfile.mkdtemp(prefix="pwnrm_")
-    os.chmod(tmp_dir, stat.S_IRWXU)   # 0o700 — owner only
+    os.chmod(tmp_dir, stat.S_IRWXU)   # 0o700 — owner only (POSIX)
+
+    if platform.system() == "Windows":
+        import subprocess
+        user = os.environ.get("USERNAME")
+        if user:
+            subprocess.run(
+                ["icacls", str(tmp_dir), "/inheritance:r", "/grant", f"{user}:(OI)(CI)F"],
+                capture_output=True,
+                creationflags=0x08000000
+            )
 
     cert_path = os.path.join(tmp_dir, "cert.pem")
     key_path  = os.path.join(tmp_dir, "key.pem")

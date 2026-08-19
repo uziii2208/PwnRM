@@ -98,7 +98,8 @@ class Transport:
     def _send_auth(self, req, proto, phase=""):
         rsp      = self.session.post(self.url,
                                      headers={"Authorization": f"{proto} {b64str(req)}"},
-                                     allow_redirects=False)
+                                     allow_redirects=False,
+                                     timeout=30)
         www_auth = rsp.headers.get("WWW-Authenticate","")
         if rsp.status_code == 200 and not www_auth:
             return b""
@@ -161,7 +162,8 @@ class BasicTransport(Transport):
     def _send(self, req):
         return self.session.post(self.url, data=req,
                                  headers={"Content-Type":"application/soap+xml;charset=UTF-8"},
-                                 allow_redirects=False)
+                                 allow_redirects=False,
+                                 timeout=30)
     def _auth(self): pass
 
 
@@ -180,7 +182,8 @@ class ClientCertTransport(Transport):
     def _send(self, req):
         return self.session.post(self.url, data=req,
                                  headers={"Content-Type":"application/soap+xml;charset=UTF-8"},
-                                 allow_redirects=False)
+                                 allow_redirects=False,
+                                 timeout=30)
     def _auth(self): pass
 
 
@@ -198,7 +201,7 @@ class SPNEGOTransport(Transport):
         self._auth()
 
     def _send(self, req):
-        rsp = self.session.send(self._encrypted_request(req, "SPNEGO", self.proxy.wrap))
+        rsp = self.session.send(self._encrypted_request(req, "SPNEGO", self.proxy.wrap), timeout=30)
         return self._decrypted_response(rsp, self.proxy.unwrap)
 
     def _auth(self):
@@ -228,7 +231,7 @@ class KerberosTransport(Transport):
         self._auth()
 
     def _send(self, req):
-        rsp = self.session.send(self._encrypted_request(req, "Kerberos", self.proxy.wrap))
+        rsp = self.session.send(self._encrypted_request(req, "Kerberos", self.proxy.wrap), timeout=30)
         return self._decrypted_response(rsp, self.proxy.unwrap)
 
     def _auth(self):
@@ -252,7 +255,7 @@ class CredSSPTransport(Transport):
         self._auth()
 
     def _send(self, req):
-        rsp = self.session.send(self._encrypted_request(req, "CredSSP", self._wrap))
+        rsp = self.session.send(self._encrypted_request(req, "CredSSP", self._wrap), timeout=30)
         return self._decrypted_response(rsp, self._unwrap)
 
     def _auth(self):
