@@ -15,7 +15,7 @@
 
 An operator-grade WinRM execution framework for authorized Active Directory security assessments: interactive PowerShell runspace over MS-PSRP, every modern AD auth path, stealthy payload delivery, and a built-in AD triage engine — usable as a CLI tool **and** as a Python library.
 
-[Installation](#installation) · [Usage](#usage) · [Commands](#commands) · [AD Triage](#ad-triage) · [Library Usage](#library-usage) · [Troubleshooting](#troubleshooting) · [Disclaimer](#disclaimer) · [Hall Of Fame](HALL_OF_FAME.md)
+[Installation](#installation) · [Usage](#usage) · [Commands](#commands) · [AD Triage](#ad-triage) · [Share Scout](#share-scout) · [Session Scout](#session-scout) · [Library Usage](#library-usage) · [Troubleshooting](#troubleshooting) · [Disclaimer](#disclaimer) · [Hall Of Fame](HALL_OF_FAME.md)
 
 </div>
 
@@ -29,7 +29,7 @@ pip install pwnrm
 
 # Update when we have new release
 # (highly recommend when we have critical issue at previous version)
-# Currently version: 1.1.1
+# Currently version: 1.2.0
 pip install --upgrade pwnrm
 ```
 
@@ -89,6 +89,8 @@ Key flags: `--port`, `--ssl`, `--timeout`, `--ts`, `--debug`. Run `pwnrm -h` for
 | `!netrun [-xor] URL [ARG..]` | Load & invoke remote .NET assembly |
 | `!revshell IP PORT` | Raw Winsock reverse shell (full I/O) |
 | `!adtriage [-q]` | Built-in AD enumeration engine (see below) |
+| `!shares [-q] [HOST ..]` | SMB share scout — UNC access, ACLs, SYSVOL GPP cPassword detection |
+| `!sessions [-q]` | Session & network snapshot — logon sessions, Kerberos tickets, TCP, named pipes |
 | `!sysinfo` | OS / AV / hotfix / local-admin snapshot |
 | `!creds` | DPAPI / PS-history / credential artifact scanner |
 | `!log` / `!stoplog` | Toggle session transcript |
@@ -102,6 +104,20 @@ Tab-completion for all built-ins via `prompt_toolkit`.
 `!adtriage` runs a self-contained LDAP/WMI enumeration entirely inside the remote PowerShell session — no extra binaries on target. `-q` = quick mode (identity + domain + Server 2025 / BadSuccessor check).
 
 Covers: identity & privileges · domain / forest / DCs / trusts · high-value groups · Kerberoastable SPNs · AS-REP roastables · unconstrained / constrained / RBCD delegation · ADCS templates (ESC1/3/4 quick scan) · gMSA / dMSA (BadSuccessor) · ACL quick-wins on DA/DC/krbtgt · pre-Windows-2000 compat access · password-never-expires admins.
+
+<a id="share-scout"></a>
+## Share Scout
+
+`!shares` runs a self-contained SMB share enumeration entirely inside the remote PowerShell session — no extra binaries on target. `-q` = quick mode (local shares + UNC probe only). Optionally pass explicit `[HOST ..]` to scan remote machines; without targets, auto-discovers domain computers via AD (capped at 20 hosts).
+
+Covers: local share inventory via `Win32_Share` · UNC access testing (read **and** write probe) · ACL quick-wins flagging `Everyone / Authenticated Users` with write rights · SYSVOL/NETLOGON sensitive file sweep · **GPP `cPassword` auto-detection** (CVE-2014-1812) · open files (`net files`) · active SMB sessions (`net session`).
+
+<a id="session-scout"></a>
+## Session Scout
+
+`!sessions` runs a self-contained active logon session and network snapshot entirely inside the remote PowerShell session — no extra binaries on target. `-q` = quick mode (logon sessions + RDP MRU only).
+
+Covers: interactive / remote / service logon sessions via `Win32_LogonSession` · RDP client MRU and saved credentials from registry · Kerberos ticket cache (`klist`) with TGT flagging · established TCP connections with process attribution and external IP detection · listening port inventory with service labels (RDP, MSSQL, WinRM, etc.) · named pipe exposure with sensitive pipe flagging (`lsass`, `spoolss`, `samr`, `epmapper`...) · SYSTEM-level scheduled tasks currently running.
 
 <a id="library-usage"></a>
 ## Library Usage
@@ -126,8 +142,8 @@ PwnRM/
 │   ├── __main__.py            # python -m pwnrm
 │   ├── cli.py                 # CLI entry point
 │   ├── core/                  # transports, Runspace, MS-PSRP
-│   ├── shell/                 # PwnShell, built-in commands, AD triage
-│   └── resources/adtriage.ps1 # AD Triage payload
+│   ├── shell/                 # PwnShell, built-in commands, AD/share/session triage
+│   └── resources/             # adtriage.ps1 · shares.ps1 · sessions.ps1
 ├── pyproject.toml             # PyPI packaging
 ├── install.sh                 # Linux installer
 └── requirements.txt

@@ -3,7 +3,7 @@ core.api — public CLI argument parser & transport factory
 """
 
 import logging
-from argparse     import ArgumentParser
+from argparse     import ArgumentParser, RawDescriptionHelpFormatter
 from urllib.parse import urlparse
 
 from impacket.examples.utils import parse_target
@@ -17,10 +17,27 @@ from .utils       import load_kerberos_ccache, load_pfx
 def argument_parser():
     parser = ArgumentParser(
         prog="pwnrm",
-        description="PwnRM v1.1.1 — Advanced WinRM / AD post-exploitation shell",
-        epilog="Example: pwnrm -u Administrator -p 'P@ss1' 192.168.1.10\n"
-               "         pwnrm -u user@DOMAIN -k --ccache /tmp/user.ccache dc01.domain.local\n"
-               "         pwnrm -u user@DOMAIN --pfx user.pfx --pfx-pass secret https://dc01:5986",
+        description="PwnRM v1.2.0 — Advanced WinRM / AD post-exploitation shell",
+        formatter_class=RawDescriptionHelpFormatter,
+        epilog=(
+            "Shell commands (once connected):\n"
+            "  !adtriage  [-q]              AD post-auth recon (SPNs, AS-REP, delegation, ADCS, ACLs)\n"
+            "  !shares    [-q] [HOST ..]    SMB share scout — UNC access, ACLs, SYSVOL GPP cPassword [NEW]\n"
+            "  !sessions  [-q]              Session & network snapshot — logons, Kerberos, TCP, pipes [NEW]\n"
+            "  !sysinfo                     OS / AV / hotfix snapshot\n"
+            "  !creds                       DPAPI / PS-history / credential artifact scanner\n"
+            "  !download  RPATH [LPATH]     Pull file/dir from target\n"
+            "  !upload    [-xor] LPATH      Push file to target\n"
+            "  !amsi                        Patch AmsiScanBuffer in-process\n"
+            "  !psrun     [-xor] URL        Load & exec remote PS1\n"
+            "  !netrun    [-xor] URL [ARG]  Load & exec remote .NET assembly\n"
+            "  !revshell  IP PORT           Raw Winsock reverse shell\n"
+            "\n"
+            "Examples:\n"
+            "  pwnrm -u Administrator -p 'P@ss1' 192.168.1.10\n"
+            "  pwnrm -u user@DOMAIN -k --ccache /tmp/user.ccache dc01.domain.local\n"
+            "  pwnrm -u user@DOMAIN --pfx user.pfx --pfx-pass secret https://dc01:5986"
+        ),
     )
     parser.add_argument("target",
         help="[[domain/]username[:password]@] <host> or plain <host>")

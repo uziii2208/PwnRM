@@ -26,15 +26,15 @@ _BANNER = rf"""
 {G4}██╔═══╝ ██║███╗██║██║╚██╗██║██╔══██╗██║╚██╔╝██║
 {G5}██║     ╚███╔███╔╝██║ ╚████║██║  ██║██║ ╚═╝ ██║
 {G6}╚═╝      ╚══╝╚══╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝
-{RST}{DIM}  Advanced WinRM / AD Post-Exploitation Shell  {BLD}v1.1.1{RST}
+{RST}{DIM}  Advanced WinRM / AD Post-Exploitation Shell  {BLD}v1.2.0{RST}
 {DIM}  github.com/uziii2208/PwnRM  ·  For authorized engagements only.{RST}
 """
 
 # ── Tab-completion word list ──────────────────────────────────────────────────
 _COMPLETIONS = [
     "!download", "!upload", "!amsi", "!psrun", "!netrun",
-    "!revshell", "!log", "!stoplog", "!adtriage", "!sysinfo",
-    "!creds", "!help", "exit", "quit",
+    "!revshell", "!log", "!stoplog", "!adtriage", "!shares",
+    "!sessions", "!sysinfo", "!creds", "!help", "exit", "quit",
     # common PS one-liners operators may want fast access to:
     "Get-Process", "Get-Service", "whoami", "ipconfig", "net user",
     "net localgroup administrators", "systeminfo",

