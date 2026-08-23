@@ -92,13 +92,13 @@ Issues with limited impact or requiring unrealistic attack scenarios:
 - ❌ Generic security best-practice suggestions without demonstrated impact
 - ❌ Automated scanner output without proof-of-concept
 - ❌ **CVEs in transitive dependencies** (Impacket, Cryptodome, requests, etc.) that have not been demonstrated to affect PwnRM's runtime execution path with a working exploit
-- ❌ **Theoretical MITM attacks on unencrypted WinRM (HTTP)** — operators who choose HTTP over HTTPS accept this risk explicitly; the threat model is documented
-- ❌ **"Hardcoded" XOR key or "weak" XOR encryption** — this is obfuscation for AV evasion, not a confidentiality mechanism; see Known & Accepted Design Decisions
-- ❌ **`run_sync` / `!download` memory caps being bypassable by a cooperative operator** — bounds exist to prevent accidental OOM, not adversarial exploitation by the local user
+- ❌ **Theoretical MITM attacks on unencrypted WinRM (HTTP)** - operators who choose HTTP over HTTPS accept this risk explicitly; the threat model is documented
+- ❌ **"Hardcoded" XOR key or "weak" XOR encryption** - this is obfuscation for AV evasion, not a confidentiality mechanism; see Known & Accepted Design Decisions
+- ❌ **`run_sync` / `!download` memory caps being bypassable by a cooperative operator** - bounds exist to prevent accidental OOM, not adversarial exploitation by the local user
 - ❌ **Missing rate limiting, input length caps, or request throttling** on a CLI tool with no network-facing surface
-- ❌ **PowerShell payloads being detectable by EDR** on the target — detection evasion is an operational concern, not a PwnRM vulnerability
-- ❌ **Lack of code signing on the PyPI package** — this is a PyPI-level limitation, not a PwnRM vulnerability; verify via `pip install pwnrm` SHA256 checksums in release notes
-- ❌ Reports submitted by anyone who has not read and can demonstrate understanding of this policy — we will ask a follow-up question; failure to answer closes the report
+- ❌ **PowerShell payloads being detectable by EDR** on the target - detection evasion is an operational concern, not a PwnRM vulnerability
+- ❌ **Lack of code signing on the PyPI package** - this is a PyPI-level limitation, not a PwnRM vulnerability; verify via `pip install pwnrm` SHA256 checksums in release notes
+- ❌ Reports submitted by anyone who has not read and can demonstrate understanding of this policy - we will ask a follow-up question; failure to answer closes the report
 
 ---
 
@@ -140,7 +140,7 @@ below) is demonstrated:
   for security. An active MITM on an unencrypted WinRM channel can already
   modify traffic regardless of the hash algorithm.
 - **`run_sync` 1 MB output cap and `!download` 256 MB stream cap** are OOM guards against accidental runaway output, not security boundaries. A local attacker who controls the operator's shell already has full access.
-- **Session history and logs stored under `~/.pwnrm/`** with `0o700` permissions — this is operator-side data on the operator's own machine. Key material in those files is the operator's responsibility.
+- **Session history and logs stored under `~/.pwnrm/`** with `0o700` permissions - this is operator-side data on the operator's own machine. Key material in those files is the operator's responsibility.
 - **Random per-session identifiers** for reflective .NET class names are AMSI/EDR evasion, not a security control. Their randomness strength is intentionally scoped to operational use, not cryptographic use.
 
 ---
@@ -154,10 +154,10 @@ below) is demonstrated:
 3. ✅ Build a **working proof-of-concept** (not theoretical)
 4. ✅ Check existing [Issues](../../issues) and [Security Advisories](../../security/advisories) for duplicates
 5. ✅ Reproduce on a clean install (`rm -rf /opt/pwnrm && bash install.sh`)
-6. ✅ Confirm the vulnerability is **reproducible without operator error** — reports that require the operator to already be compromised, running as root unnecessarily, or ignoring obvious warnings will be rejected
+6. ✅ Confirm the vulnerability is **reproducible without operator error** - reports that require the operator to already be compromised, running as root unnecessarily, or ignoring obvious warnings will be rejected
 7. ✅ **Do not submit output from automated scanners** (Bandit, Semgrep, Trivy, Snyk, etc.) as-is. If a scanner finding is your starting point, you must manually verify exploitability and include a working PoC before submitting
 8. ✅ Confirm your report targets **PwnRM's own code**, not a transitive dependency CVE that has not been demonstrated to affect PwnRM's actual execution path
-9. ✅ If your finding involves the XOR upload mechanism or hash-based transfer integrity — **read the [Known & Accepted Design Decisions](#known--accepted-design-decisions) section first**. These will be closed without review
+9. ✅ If your finding involves the XOR upload mechanism or hash-based transfer integrity - **read the [Known & Accepted Design Decisions](#known--accepted-design-decisions) section first**. These will be closed without review
 10. ✅ Verify the attack is **achievable from the defined threat model**: a malicious WinRM/PSRP server the operator connects to, or a MITM on an unencrypted transport. Attacks requiring local access to the operator's machine, a pre-compromised Python environment, or access to the operator's credentials are out of scope
 
 ### Submission Channels
