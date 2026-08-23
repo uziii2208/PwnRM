@@ -15,13 +15,15 @@ def get_shares_ps(quick: bool = False, targets: list[str] | None = None) -> str:
     with open(resource_path, "r", encoding="utf-8") as f:
         ps = f.read()
 
-    ps = ps.replace("'__QUICK__'", "$true" if quick else "$false")
+    ps = ps.replace("__QUICK__", "True" if quick else "False")
 
     if targets:
         # Embed as PS string array: @('host1','host2')
         target_str = ",".join(f"'{t.strip()}'" for t in targets if t.strip())
+        ps = ps.replace("'__TARGETS__'", target_str)
     else:
-        target_str = ""
+        # Replace the entire @('__TARGETS__') expression so the result is @()
+        # not @('') — a one-element array that bypasses both discovery branches.
+        ps = ps.replace("@('__TARGETS__')", "@()")
 
-    ps = ps.replace("'__TARGETS__'", target_str)
     return ps

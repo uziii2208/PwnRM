@@ -12,4 +12,4 @@ def get_sessions_ps(quick: bool = False) -> str:
     resource_path = Path(__file__).parent.parent / "resources" / "sessions.ps1"
     with open(resource_path, "r", encoding="utf-8") as f:
         ps = f.read()
-    return ps.replace("'__QUICK__'", "$true" if quick else "$false")
+    return ps.replace("__QUICK__", "True" if quick else "False")

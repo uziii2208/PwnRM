@@ -13,4 +13,4 @@ def get_adtriage_ps(quick=False) -> str:
     resource_path = Path(__file__).parent.parent / "resources" / "adtriage.ps1"
     with open(resource_path, "r", encoding="utf-8") as f:
         ps = f.read()
-    return ps.replace("'__QUICK__'", "$true" if quick else "$false")
+    return ps.replace("__QUICK__", "True" if quick else "False")
