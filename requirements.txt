@@ -6,4 +6,4 @@ pycryptodomex>=3.18.0
 cryptography>=41.0.0
 prompt-toolkit>=3.0.0
 defusedxml>=0.7.1
-pypsrp>=1.2.2
+pypsrp>=0.9.1

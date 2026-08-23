@@ -26,7 +26,7 @@ _BANNER = rf"""
 {G4}██╔═══╝ ██║███╗██║██║╚██╗██║██╔══██╗██║╚██╔╝██║
 {G5}██║     ╚███╔███╔╝██║ ╚████║██║  ██║██║ ╚═╝ ██║
 {G6}╚═╝      ╚══╝╚══╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝
-{RST}{DIM}  Advanced WinRM / AD Post-Exploitation Shell  {BLD}v1.2.2{RST}
+{RST}{DIM}  Advanced WinRM / AD Post-Exploitation Shell  {BLD}v1.2.4{RST}
 {DIM}  github.com/uziii2208/PwnRM  ·  For authorized engagements only.{RST}
 """
 
