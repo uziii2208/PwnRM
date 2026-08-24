@@ -17,7 +17,7 @@ from .utils       import load_kerberos_ccache, load_pfx
 def argument_parser():
     parser = ArgumentParser(
         prog="pwnrm",
-        description="PwnRM v1.2.5 — Advanced WinRM / AD post-exploitation shell",
+        description="PwnRM v1.2.6 — Advanced WinRM / AD post-exploitation shell",
         formatter_class=RawDescriptionHelpFormatter,
         epilog=(
             "Shell commands (once connected):\n"
