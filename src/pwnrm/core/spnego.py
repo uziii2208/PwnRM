@@ -61,6 +61,15 @@ class SPNEGOProxyNTLM:
             self.complete = True
         elif neg_state == 1:
             type2 = targ["ResponseToken"]
+            
+            # Workaround for impacket pyasn1 parsing quirk where ResponseToken returns None
+            if type2 is None and data_in:
+                idx = data_in.find(b"NTLMSSP\x00")
+                if idx != -1:
+                    type2 = data_in[idx:]
+            if type2 is None:
+                raise SPNEGOError("SPNEGO: missing ResponseToken in Type 2 challenge")
+                
             if self.gss_bindings:
                 chal  = NTLMAuthChallenge(type2)
                 info  = AV_PAIRS(chal["TargetInfoFields"])

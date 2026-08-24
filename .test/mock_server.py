@@ -49,22 +49,65 @@ REALM       = "WORKGROUP"
 # This is intentional: the goal is to test PwnRM's transport layer,
 # not to validate credentials cryptographically.
 
-NTLM_CHALLENGE = base64.b64encode(
-    b"NTLMSSP\x00"          # signature
-    b"\x02\x00\x00\x00"     # type 2
-    b"\x08\x00"             # target name length
-    b"\x08\x00"             # target name max length
-    b"\x38\x00\x00\x00"     # target name offset
-    b"\x15\x82\x8a\xe2"     # negotiate flags
-    b"\x00\x00"             # padding flags
-    b"\x00\x00\x00\x00\x00\x00\x00\x00"  # server challenge (8 bytes — zeroed for stub)
-    b"\x00\x00\x00\x00\x00\x00\x00\x00"  # reserved
-    b"\x28\x00"             # target info length
-    b"\x28\x00"             # target info max
-    b"\x40\x00\x00\x00"     # target info offset
-    b"WORKGRP"              # target name (8 bytes)
-    + b"\x00" * 40          # target info blob (zeroed stub)
-).decode()
+# Pre-built NTLM Type 2 (Challenge) — well-formed per MS-NLMP §2.2.1.2
+# TargetName="WORKGROUP" UTF-16LE, AvPairs: MsvAvNbDomainName + MsvAvEOL
+# Flags=0x628A8215, ServerChallenge=0102030405060708, Version=Win10
+import struct as _struct
+
+def _build_ntlm_type2():
+    """Well-formed NTLM Type 2 (Challenge) per MS-NLMP §2.2.1.2."""
+    TARGET_NAME = "WORKGROUP".encode("utf-16-le")
+    tlen        = len(TARGET_NAME)
+    HDR         = 56
+    av          = (_struct.pack("<HH", 2, tlen) + TARGET_NAME
+                   + _struct.pack("<HH", 0, 0))
+    alen        = len(av)
+    return (
+        b"NTLMSSP\x00"
+        + _struct.pack("<I", 2)
+        + _struct.pack("<HHI", tlen, tlen, HDR)
+        + _struct.pack("<I", 0x628A8215)
+        + b"\x01\x02\x03\x04\x05\x06\x07\x08"
+        + b"\x00" * 8
+        + _struct.pack("<HHI", alen, alen, HDR + tlen)
+        + b"\x0a\x00\x3b\x00\x00\x00\x00\x0f"
+        + TARGET_NAME + av
+    )
+
+def _build_spnego_challenge():
+    """Build SPNEGO NegTokenResp by hand-rolling DER/ASN.1 precisely.
+
+    impacket's SPNEGO_NegTokenResp omits ResponseToken unless the internal
+    pyasn1 structure is populated via the correct component path — which
+    differs between impacket versions. Building the DER directly is more
+    portable and avoids version-dependent field-assignment quirks.
+
+    Structure (RFC 4178 §4.2.2):
+      [1] NegTokenResp ::= SEQUENCE {
+        negState     [0] ENUMERATED { accept-incomplete(1) }
+        responseToken [2] OCTET STRING <NTLM Type 2>
+      }
+    """
+    def _len(n):
+        if n < 0x80: return bytes([n])
+        if n < 0x100: return bytes([0x81, n])
+        return bytes([0x82, (n >> 8) & 0xff, n & 0xff])
+    def _tlv(tag, v): return bytes([tag]) + _len(len(v)) + v
+
+    ntlm = _build_ntlm_type2()
+
+    # negState [0] EXPLICIT { ENUMERATED accept-incomplete(1) }
+    neg_state      = _tlv(0xa0, _tlv(0x0a, bytes([1])))
+    # responseToken [2] EXPLICIT { OCTET STRING }
+    response_token = _tlv(0xa2, _tlv(0x04, ntlm))
+    # SEQUENCE { negState, responseToken }
+    seq            = _tlv(0x30, neg_state + response_token)
+    # [1] EXPLICIT (NegTokenResp choice tag)
+    token          = _tlv(0xa1, seq)
+
+    return base64.b64encode(token).decode()
+
+NTLM_CHALLENGE = _build_spnego_challenge()
 
 # ── WSMan envelope helpers ────────────────────────────────────────────────────
 
@@ -172,22 +215,34 @@ class WinRMHandler(http.server.BaseHTTPRequestHandler):
             scheme, token_b64 = auth_hdr.split(" ", 1)
             token = base64.b64decode(token_b64.strip() + "==")
 
-            if token[8:12] == b"\x01\x00\x00\x00":          # Type 1 — Negotiate
+            # NTLM tokens may be raw or SPNEGO/ASN.1-wrapped (Linux impacket).
+            # Scan for the NTLMSSP signature anywhere in the blob instead of
+            # relying on a fixed byte offset.
+            sig_pos = token.find(b"NTLMSSP\x00")
+
+            if sig_pos == -1:
+                # No NTLMSSP signature — bare SPNEGO NegTokenInit or unknown.
+                # Issue challenge and let client send a proper NTLM token next.
+                print("  [NTLM] No NTLMSSP sig — issuing challenge")
+                _set_auth(addr, "challenged")
+                self._send_401(f"Negotiate {NTLM_CHALLENGE}")
+                return
+
+            msg_type = token[sig_pos + 8 : sig_pos + 12]
+
+            if msg_type == b"\x01\x00\x00\x00":          # Type 1 — Negotiate
                 print("  [NTLM] Type 1 received — issuing Type 2 challenge")
                 _set_auth(addr, "challenged")
                 self._send_401(f"Negotiate {NTLM_CHALLENGE}")
                 return
 
-            elif token[8:12] == b"\x03\x00\x00\x00":        # Type 3 — Authenticate
-                # Stub: accept any Type 3 without verifying the NT hash.
-                # Real servers verify HMAC-MD5(NTHash, challenge). We skip
-                # this intentionally — the goal is transport regression testing.
+            elif msg_type == b"\x03\x00\x00\x00":        # Type 3 — Authenticate
                 print("  [NTLM] Type 3 received — auth accepted (stub)")
                 _set_auth(addr, "ok")
                 # Fall through to dispatch the WSMan request below.
 
             else:
-                print("  [NTLM] Unknown token type — rejecting")
+                print(f"  [NTLM] Unknown message type {msg_type.hex()} — rejecting")
                 self._send_401(f"Negotiate {NTLM_CHALLENGE}")
                 return
 
