@@ -2,6 +2,7 @@
 pwnrm.cli — CLI entry point
 """
 
+import sys
 import logging
 from datetime import datetime
 from impacket import version
@@ -21,26 +22,33 @@ def main():
         logging.debug(version.getInstallationPath())
 
     timeout   = int(args.timeout)
-    transport = create_transport(args)
+    try:
+        transport = create_transport(args)
+    except Exception as e:
+        logging.error("Transport setup failed: %s", e)
+        sys.exit(1)
 
     tinfo = {
         "host": getattr(args, "target", "?"),
         "user": getattr(args, "username", "?"),
     }
 
-    with Runspace(transport, timeout) as runspace:
-        shell = PwnShell(runspace, target_info=tinfo)
-        try:
-            if args.X:
-                shell.repl(iter([args.X]))
-            else:
-                shell.help()
-                shell.repl()
-        except EOFError:
-            pass
-        finally:
-            elapsed = str(datetime.now() - shell.start_time).split(".")[0]
-            print(c(DIM, f"\n[~] Session duration: {elapsed}  |  Commands: {shell.cmd_count}\n"))
+    try:
+        with Runspace(transport, timeout) as runspace:
+            shell = PwnShell(runspace, target_info=tinfo)
+            try:
+                if args.X:
+                    shell.repl(iter([args.X]))
+                else:
+                    shell.help()
+                    shell.repl()
+            except EOFError:
+                pass
+            finally:
+                elapsed = str(datetime.now() - shell.start_time).split(".")[0]
+                print(c(DIM, f"\n[~] Session duration: {elapsed}  |  Commands: {shell.cmd_count}\n"))
+    except Exception as e:
+        logging.error("Connection failed: %s", e)
 
 
 if __name__ == "__main__":

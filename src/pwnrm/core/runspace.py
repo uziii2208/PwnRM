@@ -36,8 +36,18 @@ class Runspace:
         use_ssl  = parsed.scheme == "https"
 
         # Determine auth method from transport type
+        extra_auth_kwargs: dict = {}
         if isinstance(transport, ClientCertTransport):
             auth = "certificate"
+            # [GAP-B FIX] Forward client certificate material to pypsrp.
+            # ClientCertTransport stores (cert_pem_path, cert_key_path) in
+            # transport.session.cert (transports.py:179). Without forwarding
+            # these, pypsrp receives auth="certificate" but no cert paths and
+            # silently degrades — the PSRP session opens without mutual TLS.
+            cert_data = getattr(transport.session, "cert", None)
+            if isinstance(cert_data, (tuple, list)) and len(cert_data) == 2:
+                extra_auth_kwargs["certificate_pem"]     = cert_data[0]
+                extra_auth_kwargs["certificate_key_pem"] = cert_data[1]
         elif isinstance(transport, CredSSPTransport):
             auth = "credssp"
         elif isinstance(transport, KerberosTransport):
@@ -71,7 +81,25 @@ class Runspace:
             cert_validation   = False,
             connection_timeout= timeout,
             read_timeout      = timeout,
+            **extra_auth_kwargs,
         )
+
+        # [GAP-A FIX] Enforce redirect policy on pypsrp's internal session.
+        # WSMan() creates its own requests.Session() lazily (wsman.py:813,939)
+        # via _TransportHTTP._build_session().  That session is a separate object
+        # from PwnRM's Transport.session — transports.py:78's max_redirects guard
+        # never touches it.  Patch _build_session() so the session is hardened
+        # the moment pypsrp creates it on first use, before any HTTP request fires.
+        _wt = getattr(self._wsman, "transport", None)
+        if _wt is not None:
+            _orig_build = _wt._build_session
+            def _hardened_build(_orig=_orig_build):
+                sess = _orig()
+                sess.max_redirects = 0     # block SSRF via server-issued redirect
+                sess.trust_env    = False  # ignore HTTP_PROXY / HTTPS_PROXY env vars
+                return sess
+            _wt._build_session = _hardened_build
+
         self._pool      = None
         self.shell_id   = None
         self.command_id = None

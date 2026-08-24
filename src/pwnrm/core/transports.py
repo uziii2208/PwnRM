@@ -8,7 +8,8 @@ from struct    import pack, unpack
 from random    import randbytes
 from urllib.parse import urlparse
 
-from requests           import Session, Request
+from requests                import Session, Request
+from requests.exceptions     import TooManyRedirects as _TooManyRedirects
 from urllib3.util       import SKIP_HEADER
 from urllib3.exceptions import InsecureRequestWarning
 from urllib3            import disable_warnings
@@ -81,10 +82,20 @@ class Transport:
         self.session.headers["Accept-Encoding"] = SKIP_HEADER
 
     def send(self, req):
-        rsp = self._send(req)
-        if rsp.status_code == 401:
-            self._auth()
+        # _TooManyRedirects is raised by requests when max_redirects=0 fires
+        # inside resolve_redirects(yield_requests=True) even with allow_redirects=False
+        # (requests ≥2.32 always calls that generator to populate r._next).
+        # Convert it to TransportError so the caller gets a clean diagnostic instead
+        # of an uncaught exception traceback.
+        try:
             rsp = self._send(req)
+            if rsp.status_code == 401:
+                self._auth()
+                rsp = self._send(req)
+        except _TooManyRedirects as e:
+            raise TransportError(
+                f"Server issued HTTP redirect — SSRF attempt blocked: {e}"
+            ) from e
         if rsp.status_code in (301, 302, 303, 307, 308):
             raise TransportError(
                 f"Unexpected HTTP redirect ({rsp.status_code}) to "
@@ -96,10 +107,21 @@ class Transport:
         return rsp.content
 
     def _send_auth(self, req, proto, phase=""):
-        rsp      = self.session.post(self.url,
-                                     headers={"Authorization": f"{proto} {b64str(req)}"},
-                                     allow_redirects=False,
-                                     timeout=30)
+        # allow_redirects=False prevents the session from *following* redirects,
+        # but requests ≥2.32 still calls resolve_redirects(yield_requests=True) to
+        # set r._next even when following is disabled.  With max_redirects=0, that
+        # internal call raises TooManyRedirects before we get the response object.
+        # Catch it and raise a TransportError so the caller receives a clean message.
+        try:
+            rsp = self.session.post(self.url,
+                                    headers={"Authorization": f"{proto} {b64str(req)}"},
+                                    allow_redirects=False,
+                                    timeout=30)
+        except _TooManyRedirects as e:
+            raise TransportError(
+                f"Server issued HTTP redirect during {proto} handshake — "
+                f"SSRF attempt blocked: {e}"
+            ) from e
         www_auth = rsp.headers.get("WWW-Authenticate","")
         if rsp.status_code == 200 and not www_auth:
             return b""
