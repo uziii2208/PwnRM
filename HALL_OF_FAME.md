@@ -7,7 +7,7 @@
 **Recognizing the community members who helped harden PwnRM through responsible disclosure.**
 
 ![Hall of Fame](https://img.shields.io/badge/Hall%20of%20Fame-2026-gold?style=for-the-badge&logo=trophy)
-![Researchers](https://img.shields.io/badge/Researchers-2-blue?style=for-the-badge)
+![Researchers](https://img.shields.io/badge/Researchers-3-blue?style=for-the-badge)
 
 </div>
 
