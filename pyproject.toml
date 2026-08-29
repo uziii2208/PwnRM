@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pwnrm"
-version = "1.2.6"
-description = "Advanced WinRM / AD Post-Exploitation Shell"
+version = "2.0.0"
+description = "Advanced WinRM / AD Post-Exploitation Platform (2026-2027 TTPs)"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [

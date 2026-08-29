@@ -17,21 +17,30 @@ from .utils       import load_kerberos_ccache, load_pfx
 def argument_parser():
     parser = ArgumentParser(
         prog="pwnrm",
-        description="PwnRM v1.2.6 — Advanced WinRM / AD post-exploitation shell",
+        description="PwnRM v2.0.0 — Advanced WinRM / AD Post-Exploitation Platform (2026-2027 TTPs)",
         formatter_class=RawDescriptionHelpFormatter,
         epilog=(
             "Shell commands (once connected):\n"
-            "  !adtriage  [-q]              AD post-auth recon (SPNs, AS-REP, delegation, ADCS, ACLs)\n"
-            "  !shares    [-q] [HOST ..]    SMB share scout — UNC access, ACLs, SYSVOL GPP cPassword [NEW]\n"
-            "  !sessions  [-q]              Session & network snapshot — logons, Kerberos, TCP, pipes [NEW]\n"
-            "  !sysinfo                     OS / AV / hotfix snapshot\n"
-            "  !creds                       DPAPI / PS-history / credential artifact scanner\n"
-            "  !download  RPATH [LPATH]     Pull file/dir from target\n"
-            "  !upload    [-xor] LPATH      Push file to target\n"
-            "  !amsi                        Patch AmsiScanBuffer in-process\n"
-            "  !psrun     [-xor] URL        Load & exec remote PS1\n"
-            "  !netrun    [-xor] URL [ARG]  Load & exec remote .NET assembly\n"
-            "  !revshell  IP PORT           Raw Winsock reverse shell\n"
+            "  !session   [list|switch|save|exec-all]   Multi-session manager & jump graph\n"
+            "  !socks     [PORT|stop|status]            In-band SOCKS5 proxy multiplexer\n"
+            "  !portfwd   [LPORT RHOST:RPORT|list|stop] Local/remote port forwarder\n"
+            "  !module    [list|run <name>]             Extensible module & plugin subsystem\n"
+            "  !adcs      [-q|--template <T>|--wsus]    Full ADCS ESC1-ESC17+ engine & triage\n"
+            "  !kerberos  [--roast|--asrep|--dmsa]      AES Kerberoast, AS-REP & dMSA suite\n"
+            "  !entra     [-s]                          Hybrid Entra ID / Azure AD PRT pivot\n"
+            "  !creds     [--vault|--dpapi|--history]   Deep credential & token artifact hunter\n"
+            "  !bloodhound [-c <methods>]               In-memory AD graph collector (BloodHound)\n"
+            "  !lateral   [--subnet <s>]                Subnet scout & lateral movement engine\n"
+            "  !evasion   [--edr|--amsi|--etw]          Polymorphic AMSI/ETW bypass & EDR scout\n"
+            "  !playbook  [--list|--run <name>]         Declarative red team playbook runner\n"
+            "  !loot                                    View organized credentials & artifacts\n"
+            "  !opsec     [stealth|balanced|aggressive] Toggle execution jitter & profile\n"
+            "  !download  RPATH [LPATH]                 Pull file/dir from target\n"
+            "  !upload    [-xor] LPATH                  Push file to target\n"
+            "  !amsi                                    Patch AmsiScanBuffer in-process\n"
+            "  !psrun     [-xor] URL                    Load & exec remote PS1\n"
+            "  !netrun    [-xor] URL [ARG]              Load & exec remote .NET assembly\n"
+            "  !revshell  IP PORT                       Raw Winsock reverse shell\n"
             "\n"
             "Examples:\n"
             "  pwnrm -u Administrator -p 'P@ss1' 192.168.1.10\n"

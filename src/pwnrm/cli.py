@@ -14,6 +14,12 @@ from .shell.ui   import _BANNER, c, DIM
 
 
 def main():
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     print(_BANNER)
     args      = argument_parser().parse_args()
     logger.init(args.ts)

