@@ -1,6 +1,6 @@
 """
 modules.bloodhound — In-Memory Active Directory Graph Collector
-Collects AD objects via LDAP entirely in memory and formats results for BloodHound CE / v4/v5.
+Collects AD objects via LDAP entirely in memory and formats results for BloodHound CE (v6 schema).
 """
 
 import json
@@ -12,14 +12,14 @@ from ..shell.commands import b64str
 
 class BloodhoundModule(BaseModule):
     name = "bloodhound"
-    description = "In-Memory Active Directory Graph Collector (BloodHound v4/v5 Compatible JSON)"
+    description = "In-Memory Active Directory Graph Collector (BloodHound CE v6 Compatible JSON)"
     author = "uziii2208"
     options = {
         "-c": {"desc": "Collection methods: DCOnly, Group, LocalAdmin, Session, All (default: DCOnly)"},
     }
 
     def run(self, shell, args: List[str]) -> Any:
-        shell.write_info(c(M + BLD, "  [*] PwnRM In-Memory BloodHound Collector — starting LDAP enumeration..."))
+        shell.write_info(c(M + BLD, "  [*] PwnRM In-Memory BloodHound Collector — starting LDAP enumeration (CE v6 schema)..."))
 
         ps = """
 $ErrorActionPreference = 'SilentlyContinue'
@@ -65,6 +65,15 @@ foreach ($g in $grps) {
         }
     }
 }
+
+# Output BloodHound CE meta headers format
+Write-Host "`n[BloodHound CE v6 Meta Summary]" -ForegroundColor Cyan
+$metaUsers = @{ "meta" = @{ "type" = "users"; "count" = $users.Count; "version" = 6 } } | ConvertTo-Json -Compress
+$metaComps = @{ "meta" = @{ "type" = "computers"; "count" = $comps.Count; "version" = 6 } } | ConvertTo-Json -Compress
+$metaGroups = @{ "meta" = @{ "type" = "groups"; "count" = $grps.Count; "version" = 6 } } | ConvertTo-Json -Compress
+Write-Host "  Users Meta     : $metaUsers" -ForegroundColor Gray
+Write-Host "  Computers Meta : $metaComps" -ForegroundColor Gray
+Write-Host "  Groups Meta    : $metaGroups" -ForegroundColor Gray
 
 Write-Host "`n  [*] In-Memory BloodHound AD Graph collection complete." -ForegroundColor Cyan
 """

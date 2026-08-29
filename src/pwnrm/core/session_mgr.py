@@ -11,6 +11,10 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
+from cryptography.fernet import Fernet
+
+# In-memory ephemeral key — session metadata encrypted on disk and unreadable post-process
+_SESSION_KEY = Fernet(Fernet.generate_key())
 
 
 class SessionNode:
@@ -129,35 +133,49 @@ class SessionManager:
         return res
 
     def fan_out_exec(self, cmd: str) -> Dict[int, str]:
-        """Execute a command across all active sessions sequentially."""
+        """Execute a command across all active sessions with [S:X | Host] output labeling."""
         results = {}
         for sid, node in list(self.sessions.items()):
             if not node.is_alive:
                 continue
+            prefix = f"[S:{sid} | {node.host}]"
             try:
                 out = []
                 for o in node.runspace.run_command(cmd):
                     if "stdout" in o:
-                        out.append(o["stdout"])
+                        for line in o["stdout"].splitlines():
+                            out.append(f"{prefix} {line}")
                 results[sid] = "\n".join(out)
                 node.last_active = datetime.now()
             except Exception as e:
-                results[sid] = f"[ERROR] {e}"
+                results[sid] = f"{prefix} [ERROR] {e}"
         return results
 
     def save_state(self, filename: str = "sessions.json") -> str:
-        """Serialize session metadata securely to disk."""
+        """Serialize and encrypt session metadata securely to disk using in-memory key."""
         target_file = self.sessions_dir / filename
         data = {
             "saved_at": datetime.now().isoformat(),
             "active_session": self.current_session_id,
             "sessions": [s.to_dict() for s in self.sessions.values()]
         }
+        raw_bytes = json.dumps(data, indent=2).encode("utf-8")
+        encrypted_bytes = _SESSION_KEY.encrypt(raw_bytes)
+
         fd = os.open(str(target_file), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         try:
-            with open(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            with open(fd, "wb") as f:
+                f.write(encrypted_bytes)
         except Exception:
             os.close(fd)
             raise
         return str(target_file)
+
+    def load_state(self, filename: str = "sessions.json") -> dict:
+        """Decrypts and loads session metadata from disk using the in-memory key."""
+        target_file = self.sessions_dir / filename
+        if not target_file.exists():
+            return {}
+        encrypted_bytes = target_file.read_bytes()
+        decrypted_bytes = _SESSION_KEY.decrypt(encrypted_bytes)
+        return json.loads(decrypted_bytes.decode("utf-8"))

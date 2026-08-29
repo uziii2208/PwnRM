@@ -1,5 +1,5 @@
 """
-tests.test_session_mgr — Unit tests for multi-session management
+tests.test_session_mgr — Unit tests for multi-session management & encrypted persistence
 """
 
 import tempfile
@@ -50,14 +50,23 @@ class TestSessionManager(unittest.TestCase):
         res = self.mgr.fan_out_exec("whoami")
         self.assertIn(0, res)
         self.assertIn(1, res)
-        self.assertEqual(res[0], "executed: whoami")
-        self.assertEqual(res[1], "executed: whoami")
+        self.assertEqual(res[0], "[S:0 | host1] executed: whoami")
+        self.assertEqual(res[1], "[S:1 | host2] executed: whoami")
 
-    def test_save_and_close(self):
+    def test_save_and_load_encrypted(self):
         r1 = MockRunspace()
         self.mgr.register_session(r1, None, {"host": "host1", "user": "u1"})
         save_path = self.mgr.save_state("test_sessions.json")
         self.assertTrue(Path(save_path).exists())
+
+        # Verify on-disk file is ciphertext, not plaintext JSON
+        raw_on_disk = Path(save_path).read_bytes()
+        self.assertFalse(raw_on_disk.startswith(b"{"))
+
+        # Verify load_state decrypts correctly
+        loaded = self.mgr.load_state("test_sessions.json")
+        self.assertEqual(len(loaded.get("sessions", [])), 1)
+        self.assertEqual(loaded["sessions"][0]["host"], "host1")
 
         self.assertTrue(self.mgr.close_session(0))
         self.assertTrue(r1.closed)

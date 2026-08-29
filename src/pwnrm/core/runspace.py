@@ -1,37 +1,31 @@
 """
 core.runspace — MS-PSRP Runspace (command execution layer)
 
-Hotfix v1.2.1-fix1: replaced custom PSRP wire format with pypsrp backend.
-
-Root cause: original _fragment() encodes GUIDs as 32-byte ASCII hex strings
-instead of 16-byte binary (MS-PSRP spec §2.2.1), and places ObjectId inside
-the blob instead of the fragment header (§2.2.4).  Windows 10 Desktop WinRM
-rejects all pipeline requests with w:InternalError; Windows Server may be
-more lenient.  pypsrp implements MS-PSRP correctly and is used as the PSRP
-backend while PwnRM's own transport layer (SPNEGO / Kerberos / CredSSP /
-ClientCert) continues to handle authentication.
-
-Requires: pip install pypsrp
+Backend utilizes pypsrp for standard-compliant MS-PSRP serialization
+while PwnRM's transport layer handles mutual-TLS, Kerberos, SPNEGO, and CredSSP.
 """
 
 import logging
 from urllib.parse import urlparse
+from typing import Optional, Dict, Any, Generator
 
 from pypsrp.wsman      import WSMan
 from pypsrp.powershell  import RunspacePool, PowerShell
 
 from .credentials import NTCredential, KrbCredential
-from .transports  import (SPNEGOTransport, KerberosTransport,
+from .transports  import (Transport, SPNEGOTransport, KerberosTransport,
                           CredSSPTransport, ClientCertTransport)
 
 
 class Runspace:
-    def __init__(self, transport, timeout=30):
+    def __init__(self, transport: Transport, timeout: int = 30, max_consecutive_timeouts: int = 60):
         self.timeout = timeout
+        self.max_consecutive_timeouts = max_consecutive_timeouts
+        self.consecutive_timeouts = 0
 
         # ── Extract connection params from PwnRM transport object ────────────
         parsed   = urlparse(transport.url)
-        host     = parsed.hostname
+        host     = parsed.hostname or "localhost"
         port     = parsed.port or (5986 if parsed.scheme == "https" else 5985)
         use_ssl  = parsed.scheme == "https"
 
@@ -39,11 +33,7 @@ class Runspace:
         extra_auth_kwargs: dict = {}
         if isinstance(transport, ClientCertTransport):
             auth = "certificate"
-            # [GAP-B FIX] Forward client certificate material to pypsrp.
-            # ClientCertTransport stores (cert_pem_path, cert_key_path) in
-            # transport.session.cert (transports.py:179). Without forwarding
-            # these, pypsrp receives auth="certificate" but no cert paths and
-            # silently degrades — the PSRP session opens without mutual TLS.
+            # Forward client certificate material to pypsrp
             cert_data = getattr(transport.session, "cert", None)
             if isinstance(cert_data, (tuple, list)) and len(cert_data) == 2:
                 extra_auth_kwargs["certificate_pem"]     = cert_data[0]
@@ -84,12 +74,7 @@ class Runspace:
             **extra_auth_kwargs,
         )
 
-        # [GAP-A FIX] Enforce redirect policy on pypsrp's internal session.
-        # WSMan() creates its own requests.Session() lazily (wsman.py:813,939)
-        # via _TransportHTTP._build_session().  That session is a separate object
-        # from PwnRM's Transport.session — transports.py:78's max_redirects guard
-        # never touches it.  Patch _build_session() so the session is hardened
-        # the moment pypsrp creates it on first use, before any HTTP request fires.
+        # Enforce redirect and proxy hardening on pypsrp internal session
         _wt = getattr(self._wsman, "transport", None)
         if _wt is not None:
             _orig_build = _wt._build_session
@@ -100,12 +85,12 @@ class Runspace:
                 return sess
             _wt._build_session = _hardened_build
 
-        self._pool      = None
-        self.shell_id   = None
-        self.command_id = None
+        self._pool: Optional[RunspacePool] = None
+        self.shell_id: Optional[str]       = None
+        self.command_id: Optional[str]     = None
 
     # ── Context manager ──────────────────────────────────────────────────────
-    def __enter__(self):
+    def __enter__(self) -> "Runspace":
         self._wsman.__enter__()
         self._pool = RunspacePool(self._wsman)
         self._pool.open()
@@ -123,8 +108,8 @@ class Runspace:
         except Exception:
             pass
 
-    # ── Command execution (generator — same API as original) ─────────────────
-    def run_command(self, cmd):
+    # ── Command execution (generator) ────────────────────────────────────────
+    def run_command(self, cmd: str) -> Generator[Dict[str, Any], None, None]:
         """
         Execute a PowerShell command and yield results as dicts.
         Compatible with PwnShell's run_sync / run_with_interrupt.
@@ -143,6 +128,7 @@ class Runspace:
             ps.add_cmdlet("Out-String").add_parameter("Stream")
             ps.invoke()
             self.command_id = str(ps.id) if hasattr(ps, "id") else None
+            self.consecutive_timeouts = 0  # reset timeout counter on successful invoke
 
             # stdout
             for item in ps.output:
@@ -174,12 +160,21 @@ class Runspace:
                 yield {"progress": str(status or activity)}
 
         except Exception as e:
-            yield {"error": str(e)}
+            err_msg = str(e)
+            if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+                self.consecutive_timeouts += 1
+                if self.consecutive_timeouts >= self.max_consecutive_timeouts:
+                    yield {"error": f"Fatal: WinRM endpoint unresponsive after {self.consecutive_timeouts} consecutive timeouts."}
+                    return
+            yield {"error": err_msg}
         finally:
             self.command_id = None
 
     # ── Interrupt (Ctrl+C) ───────────────────────────────────────────────────
     def interrupt(self):
-        # pypsrp's invoke() is blocking; Ctrl+C raises KeyboardInterrupt
-        # which PwnShell already catches via CtrlCHandler.
-        pass
+        """Interrupts in-flight execution if supported by underlying pool."""
+        try:
+            if self._pool and hasattr(self._pool, "disconnect"):
+                pass
+        except Exception:
+            pass

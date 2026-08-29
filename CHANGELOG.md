@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.1] - 2026-08-29
+
+### Security Hardening & Full Niche Operator Quality Pass
+
+This release delivers comprehensive security hardening, vulnerability mitigations (FIX-01 to FIX-09), ephemeral session encryption, dual ETW kernel telemetry blinding, and operational refinements across the platform.
+
+### Fixed & Hardened (Security Audits FIX-01 – FIX-09)
+- **FIX-01 (CWE-400 / Data Loss)**: Fixed closure rebinding bug in `download()` stream collector by switching to in-place `buf.extend(chunk)` and added empty-stream vs collection-failure diagnostic errors.
+- **FIX-02 (CWE-78 / CWE-88)**: Resolved PowerShell single-quote injection in `upload()` by enforcing `_pde()` double-quoted escaping and `-LiteralPath` parameters across all file manipulation cmdlets.
+- **FIX-03 (CWE-73 / CWE-22)**: Fixed client-side trust of server-returned paths in `download()` by deriving default local filenames strictly from user input arguments.
+- **FIX-04 (CWE-693)**: Replaced static AMSI patch byte signatures (`b8 57 00 07 80 c3`) with dynamic `build_amsi_patch()` polymorphic NOP generator (`xchg`, multi-byte NOP prefixes) and eliminated hardcoded `Start-Sleep` commands.
+- **FIX-05 (CWE-330)**: Replaced non-CSPRNG Mersenne Twister `random.randint` and `randbytes` with `secrets` module across XOR keys (`secrets.randbelow(254) + 1`), CredSSP nonces (`secrets.token_bytes(32)`), and temporary file identifiers.
+- **FIX-06 (CWE-611)**: Implemented safe XML parsing via `defusedxml.ElementTree` in `core.psrp` to protect against XML entity expansion / billion laughs DoS.
+- **FIX-07 (CWE-22 / CWE-78)**: Reimplemented `_validate_remote_path()` regex whitelist (`_SAFE_WINPATH`, `_SAFE_UNCPATH`) to strictly block directory traversal (`..`) and PowerShell shell injection characters.
+- **FIX-08 (CWE-400)**: Enforced 1MB output buffer ceiling in `run_sync()` with automatic output truncation and runspace interrupt.
+- **FIX-09 (CWE-295 / CWE-300)**: Added cryptographic `pubKeyAuth` unwrapping and binding hash verification against `SHA256(b"CredSSP Server-To-Client Binding Hash\x00" + nonce + pubkey)` with CredSSP v5 protocol fallback support.
+- **OPT-01**: Eliminated interrupt race condition in `run_with_interrupt()` by holding `CtrlCHandler` across the entire generator stream.
+- **OPT-02 & OPT-03**: Added real-time percentage progress calculation for uploads and transformed `help()` into a dynamic, structured `COMMAND_REGISTRY`.
+- **OPT-04**: Wrapped transcript log file output with `strip_ansi()` to ensure clean ASCII/UTF-8 log archives.
+- **OPT-07**: Zeroized sensitive memory buffer (`buf[:] = b'\x00' * len(buf)`) on download MD5 checksum integrity failure.
+- **OPT-08**: Introduced `HISTORY_EXCLUDE_PATTERN` preventing passwords, hashes, and secrets from persisting into `.pwnrm_history`.
+- **NICHE-01 & NICHE-02**: Replaced bare `except:` clauses in `utfstr()` with `except Exception:` and sanitized single-quote escaping in `get_shares_ps()`.
+
+### Added & Enhanced (Tier 1–3 Architectural Upgrades)
+- **Ephemeral Session Encryption**: Integrated in-memory `Fernet` encryption (`_SESSION_KEY`) for serialized session metadata under `~/.pwnrm/sessions/` to prevent credential exposure in post-engagement forensic dumps.
+- **Dual ETW Telemetry Evasion**: Extended `!evasion` to patch both `EtwEventWrite` and `EtwEventWriteFull` in `ntdll.dll` for Windows 10 21H2+, Windows 11, and Server 2022/2025.
+- **Structured Loot `MANIFEST.json`**: Added automatic SHA-256 calculation and manifest indexing across all collected credentials and artifacts in `~/.pwnrm/loot/`.
+- **Multi-Session Output Labeling**: Prefixed `fan_out_exec` stream output with `[S:{sid} | {host}]` tags during distributed multi-target execution.
+- **Plugin Architecture Integrity**: Added `verify_plugin_integrity()` to `ModuleManager` to validate permissions and reject world-writable plugin files before dynamic loading.
+- **BloodHound CE v6 Meta Headers**: Updated `!bloodhound` in-memory LDAP enumeration to output BloodHound CE v6 compatible metadata headers (`{"meta": {"type": "...", "count": N, "version": 6}}`).
+- **Playbook `on_fail` Cleanup Hooks**: Added automated execution of `cleanup_on_fail` rollback hooks when an automated red team playbook fails mid-execution.
+- **Resource-Based Constrained Delegation (RBCD)**: Added `msDS-AllowedToActOnBehalfOfOtherIdentity` inspection to `!kerberos`.
+- **Enterprise CA Health Check**: Added CA certificate expiration detection and CRL/AIA status checks to `!adcs`.
+- **Lateral Movement Tagging**: Tagged pivot opportunities with structured status markers (`[REACHABLE_PORT_OPEN]`) in `!lateral`.
+- **Type Annotations**: Comprehensive PEP 484 type annotations added across core transports, runspace, session manager, and API modules.
+- **Test Suite Expansion**: 22 unit and security regression tests passing with 100% success rate.
+
+---
+
 ## [2.0.0] - 2026-08-29
 
 ### Major Transformation: Next-Generation WinRM Red Team Operator Platform (2026–2027 TTPs)

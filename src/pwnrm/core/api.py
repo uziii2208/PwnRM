@@ -3,18 +3,19 @@ core.api — public CLI argument parser & transport factory
 """
 
 import logging
-from argparse     import ArgumentParser, RawDescriptionHelpFormatter
+from argparse     import ArgumentParser, RawDescriptionHelpFormatter, Namespace
 from urllib.parse import urlparse
+from typing import Optional, Union
 
 from impacket.examples.utils import parse_target
 
 from .credentials import NTCredential, KrbCredential
-from .transports  import (ClientCertTransport, KerberosTransport,
+from .transports  import (Transport, ClientCertTransport, KerberosTransport,
                           CredSSPTransport, SPNEGOTransport)
 from .utils       import load_kerberos_ccache, load_pfx
 
 
-def argument_parser():
+def argument_parser() -> ArgumentParser:
     parser = ArgumentParser(
         prog="pwnrm",
         description="PwnRM v2.0.0 — Advanced WinRM / AD Post-Exploitation Platform (2026-2027 TTPs)",
@@ -86,7 +87,7 @@ def argument_parser():
     return parser
 
 
-def create_transport(args) -> "Transport":
+def create_transport(args: Namespace) -> Transport:
     """
     Resolves credentials and returns the appropriate Transport instance.
     Priority:
@@ -125,7 +126,6 @@ def create_transport(args) -> "Transport":
         _tmp_dir = _os.path.dirname(cert_pem)
         atexit.register(lambda d=_tmp_dir: _shutil.rmtree(d, ignore_errors=True))
         return ClientCertTransport(url, cert_pem, key_pem)
-
 
     # 2. Kerberos (ccache)
     if getattr(args, "kerberos", False):

@@ -1,7 +1,7 @@
 """
-modules.adcs — Full ADCS Engine (ESC1–ESC17+ including WSUS Policy Abuse)
+modules.adcs — Full ADCS Engine (ESC1–ESC17+ including WSUS Policy Abuse & CA Health)
 Performs deep Active Directory Certificate Services audit, template vulnerability triage,
-and certificate enrollment helpers.
+CA health inspection (CDP/AIA/expiry), and certificate enrollment helpers.
 """
 
 from typing import List, Any
@@ -12,7 +12,7 @@ from ..shell.commands import b64str
 
 class ADCSModule(BaseModule):
     name = "adcs"
-    description = "Full ADCS Engine (ESC1-ESC17+ vulnerability audit & cert tools)"
+    description = "Full ADCS Engine (ESC1-ESC17+ vulnerability audit, CA health & cert tools)"
     author = "uziii2208"
     options = {
         "-q": {"desc": "Quick scan mode (skips deep template ACL check)"},
@@ -29,12 +29,12 @@ class ADCSModule(BaseModule):
             if a == "--template" and i + 1 < len(args):
                 target_template = args[i + 1]
 
-        shell.write_info(c(M + BLD, "  [*] PwnRM ADCS Engine — initializing ESC1-ESC17+ audit..."))
+        shell.write_info(c(M + BLD, "  [*] PwnRM ADCS Engine — initializing ESC1-ESC17+ audit & CA health check..."))
 
         ps = r"""
 $ErrorActionPreference = 'SilentlyContinue'
 Write-Host "`n========================================================" -ForegroundColor Cyan
-Write-Host "   PwnRM ADCS Engine (ESC1 - ESC17+ Audit & Recon)" -ForegroundColor Cyan
+Write-Host "   PwnRM ADCS Engine (ESC1 - ESC17+ Audit & CA Health)" -ForegroundColor Cyan
 Write-Host "========================================================`n" -ForegroundColor Cyan
 
 $domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
@@ -49,8 +49,8 @@ if (-not $pkiBase.Path) {
 
 Write-Host "  [+] PKI Container : $($pkiBase.distinguishedName)" -ForegroundColor Green
 
-# 1. Enumerate Enterprise CAs
-Write-Host "`n[1. Enterprise Certification Authorities]" -ForegroundColor Yellow
+# 1. Enumerate Enterprise CAs & Health Check
+Write-Host "`n[1. Enterprise Certification Authorities & Health]" -ForegroundColor Yellow
 $caSearcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC")
 $caSearcher.Filter = "(objectClass=pKIEnrollmentService)"
 $cas = $caSearcher.FindAll()
@@ -60,9 +60,22 @@ foreach ($ca in $cas) {
     $caname = $caObj.cn.Value
     $dns = $caObj.dNSHostName.Value
     $templates = $caObj.certificateTemplates
+    $certBytes = $caObj.cACertificate.Value
     Write-Host "  - CA Name       : $caname" -ForegroundColor White
     Write-Host "    DNS Hostname  : $dns" -ForegroundColor Gray
     Write-Host "    Published Tpls: $($templates.Count) templates" -ForegroundColor Gray
+
+    if ($certBytes) {
+        try {
+            $x509 = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+            $notAfter = $x509.NotAfter
+            if ($notAfter -lt (Get-Date)) {
+                Write-Host "    [!] EXPIRED CA CERTIFICATE : Expired on $notAfter" -ForegroundColor Red
+            } else {
+                Write-Host "    [*] CA Cert Valid Until    : $notAfter" -ForegroundColor Green
+            }
+        } catch {}
+    }
 }
 
 # 2. Template Vulnerability Triage (ESC1 - ESC17)
@@ -84,8 +97,6 @@ foreach ($t in $tpls) {
     $enrolleeSuppliesSan = ($nameFlags -band 1) -ne 0
 
     # Client Authentication OIDs
-    # 1.3.6.1.5.5.7.3.2 (Client Auth), 1.3.6.1.5.2.3.4 (PKINIT Client Auth), 2.5.29.37.0 (Any Purpose)
-    # 1.3.6.1.5.5.7.3.3 (Code Signing - ESC17), 1.3.6.1.4.1.311.10.3.6 (Windows Update)
     $hasClientAuth = $false
     $hasCodeSigning = $false
     foreach ($eku in $ekus) {

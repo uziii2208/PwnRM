@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pwnrm"
-version = "2.0.0"
+version = "2.0.1"
 description = "Advanced WinRM / AD Post-Exploitation Platform (2026-2027 TTPs)"
 readme = "README.md"
 license = {text = "MIT"}

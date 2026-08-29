@@ -2,8 +2,8 @@
 core.spnego — SPNEGO / Kerberos GSSAPI proxies
 """
 
+import secrets
 from struct    import pack, unpack
-from random    import randbytes
 from datetime  import datetime, UTC
 
 from pyasn1.codec.ber import encoder, decoder
@@ -35,6 +35,22 @@ from .credentials import SPNEGOError
 from .utils       import krb5_mech_indep_token_decode
 
 
+# ── NTLM Capabilities & Negotiate Flags (OPT-06) ─────────────────────────────
+# 0xe0088237 breakdown:
+#   0x00000001 NTLMSSP_NEGOTIATE_UNICODE
+#   0x00000002 NTLMSSP_NEGOTIATE_OEM
+#   0x00000004 NTLMSSP_REQUEST_TARGET
+#   0x00000010 NTLMSSP_NEGOTIATE_SIGN (Session message signing)
+#   0x00000020 NTLMSSP_NEGOTIATE_SEAL (Session message encryption)
+#   0x00000200 NTLMSSP_NEGOTIATE_NTLM
+#   0x00008000 NTLMSSP_NEGOTIATE_ALWAYS_SIGN
+#   0x00080000 NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY (NTLMv2 / NTLM2 Session Security)
+#   0x20000000 NTLMSSP_NEGOTIATE_128 (128-bit session encryption)
+#   0x40000000 NTLMSSP_NEGOTIATE_KEY_EXCH (Key exchange capability)
+#   0x80000000 NTLMSSP_NEGOTIATE_56 (56-bit encryption fallback)
+NTLM_FLAGS_STANDARD = 0xe0088237
+
+
 class SPNEGOProxyNTLM:
     def __init__(self, creds, gss_bindings=None):
         self.creds        = creds
@@ -44,7 +60,7 @@ class SPNEGOProxyNTLM:
     def step(self, data_in=None):
         if data_in is None:
             self._type1 = getNTLMSSPType1()
-            self._type1["flags"] = 0xe0088237
+            self._type1["flags"] = NTLM_FLAGS_STANDARD
             init = SPNEGO_NegTokenInit()
             init["MechTypes"] = [TypesMech["NTLMSSP - Microsoft NTLM Security Support Provider"]]
             init["MechToken"] = self._type1.getData()
@@ -145,7 +161,7 @@ class SPNEGOProxyKerberos:
             auth["cksum"]["checksum"] = cksum.getData()
             auth["seq-number"]        = 0
             auth["subkey"]            = noValue
-            auth["subkey"]["keyvalue"]= randbytes(32)
+            auth["subkey"]["keyvalue"]= secrets.token_bytes(32)  # [FIX-05] CSPRNG key generation
             auth["subkey"]["keytype"] = 18   # AES256
             enc_auth = cipher.encrypt(self.creds.tgskey, 11, encoder.encode(auth), None)
             ap_req                        = AP_REQ()

@@ -6,6 +6,7 @@ import os, re, ssl, uuid, logging, tempfile
 from base64   import b64encode, b64decode
 from pathlib  import Path
 from urllib.parse import urlparse
+from typing import Generator, Any, Optional, Tuple
 
 from pyasn1.codec.ber import encoder, decoder
 from pyasn1.type.univ import ObjectIdentifier
@@ -22,20 +23,20 @@ from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_cer
 
 
 # ── encoding helpers ─────────────────────────────────────────────────────────
-def chunks(xs, n):
+def chunks(xs: bytes | list, n: int) -> Generator:
     for off in range(0, len(xs), n):
         yield xs[off:off+n]
 
-def b64str(s):
+def b64str(s: str | bytes) -> str:
     if isinstance(s, str):
         return b64encode(s.encode()).decode()
     return b64encode(s).decode()
 
 _utfstr = re.compile(r'_x([0-9a-fA-F]{4})_')
-def utfstr(s):
+def utfstr(s: str) -> str:
     try:
         return _utfstr.sub(lambda m: bytes.fromhex(m.group(1)).decode("utf-16be"), s)
-    except:
+    except Exception:  # [NICHE AUDIT 1 FIX] Replaced bare except to avoid swallowing KeyboardInterrupt/SystemExit
         return s
 
 # ── terminal output sanitizer ────────────────────────────────────────────────
@@ -51,7 +52,7 @@ _ANSI_RE = re.compile(
 )
 _CTRL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 
-def strip_ansi(s: str) -> str:
+def strip_ansi(s: Optional[str]) -> str:
     """Strip ANSI/VT100 escape sequences and dangerous control chars.
     Preserves \\t (\\x09), \\n (\\x0a), \\r (\\x0d) for normal formatting."""
     if s is None:
@@ -62,7 +63,7 @@ zero_uuid = str(uuid.UUID(bytes_le=bytes(16))).upper()
 
 
 # ── Kerberos mech-independent token helpers ──────────────────────────────────
-def krb5_mech_indep_token_encode(oid, data):
+def krb5_mech_indep_token_encode(oid: str, data: bytes) -> bytes:
     payload = encoder.encode(ObjectIdentifier(oid)) + data
     n = len(payload)
     if n < 128:
@@ -72,7 +73,7 @@ def krb5_mech_indep_token_encode(oid, data):
         size  = (128 + len(size)).to_bytes(1, "big") + size
     return b"\x60" + size + payload
 
-def krb5_mech_indep_token_decode(data):
+def krb5_mech_indep_token_decode(data: bytes) -> Tuple[Any, bytes]:
     if len(data) < 2:
         raise ValueError("Token too short for GSS-API framing")
     if data[1] < 128:
@@ -83,14 +84,14 @@ def krb5_mech_indep_token_decode(data):
 
 
 # ── TLS helpers ──────────────────────────────────────────────────────────────
-def get_server_certificate(url):
+def get_server_certificate(url: str) -> bytes:
     default_port = 5986 if urlparse(url).scheme == "https" else 5985
     addr = (urlparse(url).hostname, urlparse(url).port or default_port)
     cert = ssl.get_server_certificate(addr)
     cert = re.sub(r"-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s+", "", cert)
     return b64decode(cert)
 
-def tls_trailer_length(data_length, protocol, cipher_suite):
+def tls_trailer_length(data_length: int, protocol: str, cipher_suite: str) -> int:
     if protocol == "TLSv1.3":
         return 17
     if re.match(r"^.*[-_]GCM[-_][\w\d]*$", cipher_suite):
@@ -105,7 +106,7 @@ def tls_trailer_length(data_length, protocol, cipher_suite):
 
 
 # ── ccache loader ────────────────────────────────────────────────────────────
-def load_kerberos_ccache(ccache_path: str | None = None):
+def load_kerberos_ccache(ccache_path: Optional[str] = None) -> Tuple[str, str, Ticket, Key]:
     """
     Returns (domain, username, ticket, tgskey) from a .ccache file or
     the KRB5CCNAME environment variable.  Raises FileNotFoundError if not found.
@@ -125,7 +126,7 @@ def load_kerberos_ccache(ccache_path: str | None = None):
 
 
 # ── pfx loader ───────────────────────────────────────────────────────────────
-def load_pfx(pfx_path: str, password: str | None = None) -> tuple[str, str]:
+def load_pfx(pfx_path: str, password: Optional[str] = None) -> Tuple[str, str]:
     """
     Converts a PKCS#12 (.pfx) to a pair of temporary PEM files.
     Returns (cert_pem_path, key_pem_path).
@@ -173,4 +174,4 @@ def load_pfx(pfx_path: str, password: str | None = None) -> tuple[str, str]:
         finally:
             os.close(fd)
 
-    return cert_path, key_path
+    return cert_path, key_path

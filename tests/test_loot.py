@@ -1,7 +1,9 @@
 """
-tests.test_loot — Unit tests for LootManager
+tests.test_loot — Unit tests for LootManager & MANIFEST.json tracking
 """
 
+import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,13 +27,25 @@ class TestLootManager(unittest.TestCase):
         self.assertEqual(len(loot_data["credentials"]), 1)
         self.assertEqual(loot_data["credentials"][0]["secret"], "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0")
 
-    def test_store_artifact(self):
+    def test_store_artifact_and_manifest(self):
         target = "srv01"
-        saved = self.loot.store_artifact(target, "certs", "admin.pfx", b"PFXDATA123")
+        data = b"PFXDATA123"
+        saved = self.loot.store_artifact(target, "certs", "admin.pfx", data, source_command="!adcs")
         self.assertTrue(Path(saved).exists())
         summary = self.loot.summary()
         self.assertIn("srv01", summary)
         self.assertIn("admin.pfx", summary["srv01"]["artifacts"]["certs"])
+
+        # Check MANIFEST.json
+        manifest_path = self.loot.manifest_file
+        self.assertTrue(manifest_path.exists())
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertTrue(len(manifest.get("artifacts", [])) >= 1)
+        found = [a for a in manifest["artifacts"] if a.get("filename") == "admin.pfx"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertEqual(found[0]["source_command"], "!adcs")
 
 
 if __name__ == "__main__":

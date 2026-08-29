@@ -1,12 +1,13 @@
 """
 core.loot — Automated Structured Loot Pipeline
-Manages credentials, tickets, certificates, and extracted artifacts with permission hardening.
+Manages credentials, tickets, certificates, and extracted artifacts with permission hardening and JSON manifests.
 """
 
 import os
 import json
 import stat
 import time
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
@@ -15,12 +16,13 @@ from typing import Optional, Dict, List, Any
 class LootManager:
     """
     Structured loot collection and storage engine with strict permission hardening.
-    Organizes findings per target host/domain.
+    Organizes findings per target host/domain and maintains an operational MANIFEST.json.
     """
     def __init__(self, base_dir: Optional[Path] = None):
         self.base_dir = base_dir or Path(os.environ.get("PWNRM_DIR", str(Path.home() / ".pwnrm")))
         self.loot_root = self.base_dir / "loot"
         self._ensure_secure_dir(self.loot_root)
+        self.manifest_file = self.loot_root / "MANIFEST.json"
 
     def _ensure_secure_dir(self, d: Path):
         d.mkdir(parents=True, exist_ok=True)
@@ -38,6 +40,24 @@ class LootManager:
                     )
         except OSError:
             pass
+
+    def _update_manifest(self, entry: dict):
+        manifest_data = {"artifacts": []}
+        if self.manifest_file.exists():
+            try:
+                with open(self.manifest_file, "r", encoding="utf-8") as f:
+                    manifest_data = json.load(f)
+            except Exception:
+                manifest_data = {"artifacts": []}
+
+        manifest_data.setdefault("artifacts", []).append(entry)
+        fd = os.open(str(self.manifest_file), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            with open(fd, "w", encoding="utf-8") as f:
+                json.dump(manifest_data, f, indent=2)
+        except Exception:
+            os.close(fd)
+            raise
 
     def get_target_dir(self, target: str) -> Path:
         sanitized = "".join(c for c in target if c.isalnum() or c in "._-").strip() or "general"
@@ -74,10 +94,21 @@ class LootManager:
         except Exception:
             os.close(fd)
             raise
+
+        self._update_manifest({
+            "filename": "credentials.json",
+            "type": f"credential_{cred_type}",
+            "category": "credentials",
+            "source_command": source,
+            "timestamp": entry["timestamp"],
+            "sha256": hashlib.sha256(secret.encode()).hexdigest(),
+            "target": target,
+            "account": account
+        })
         return entry
 
-    def store_artifact(self, target: str, category: str, filename: str, data: bytes) -> str:
-        """Stores binary or text artifact (cert, ticket, dump) under the target category."""
+    def store_artifact(self, target: str, category: str, filename: str, data: bytes, source_command: str = "loot") -> str:
+        """Stores binary or text artifact (cert, ticket, dump) under the target category and updates manifest."""
         tdir = self.get_target_dir(target)
         cat_dir = tdir / category
         self._ensure_secure_dir(cat_dir)
@@ -90,6 +121,18 @@ class LootManager:
         except Exception:
             os.close(fd)
             raise
+
+        file_sha256 = hashlib.sha256(data).hexdigest()
+        self._update_manifest({
+            "filename": safe_name,
+            "type": category,
+            "category": category,
+            "source_command": source_command,
+            "timestamp": datetime.now().isoformat(),
+            "sha256": file_sha256,
+            "target": target,
+            "path": str(dst)
+        })
         return str(dst)
 
     def list_target_loot(self, target: str) -> dict:

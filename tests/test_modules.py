@@ -1,8 +1,10 @@
 """
-tests.test_modules — Unit tests for ModuleManager and module loading
+tests.test_modules — Unit tests for ModuleManager, module loading, and plugin integrity
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 from pwnrm.modules import ModuleManager, BaseModule
 
 
@@ -25,6 +27,20 @@ class TestModules(unittest.TestCase):
         adcs = mgr.get_module("adcs")
         self.assertIsNotNone(adcs)
         self.assertEqual(adcs.name, "adcs")
+
+    def test_plugin_integrity_verification(self):
+        mgr = ModuleManager()
+        with tempfile.TemporaryDirectory() as td:
+            dummy_file = Path(td) / "custom_mod.py"
+            dummy_file.write_text("from pwnrm.modules import BaseModule\nclass CustomMod(BaseModule):\n    name = 'custom'\n")
+            self.assertTrue(mgr.verify_plugin_integrity(dummy_file))
+            self.assertTrue(mgr.load_external_plugin(dummy_file))
+            self.assertIsNotNone(mgr.get_module("custom"))
+
+            # Non-existent file must fail verification
+            fake_file = Path(td) / "nonexistent.py"
+            self.assertFalse(mgr.verify_plugin_integrity(fake_file))
+            self.assertFalse(mgr.load_external_plugin(fake_file))
 
 
 if __name__ == "__main__":

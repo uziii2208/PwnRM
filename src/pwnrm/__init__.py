@@ -5,7 +5,7 @@ A modular Python framework and operator platform for WinRM-based post-exploitati
 multi-session graph orchestration, in-band SOCKS5 tunneling, and Active Directory / Entra ID abuse.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 __author__  = "uziii2208"
 
 from .core import (

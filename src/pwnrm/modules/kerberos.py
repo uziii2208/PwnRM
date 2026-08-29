@@ -1,7 +1,7 @@
 """
 modules.kerberos — Advanced Kerberos Suite (2026-2027 TTPs)
 Kerberoast (AES256 priority), AS-REP roasting, Diamond Ticket assistant,
-and Server 2025 dMSA / BadSuccessor abuse analysis.
+RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity), and Server 2025 dMSA abuse analysis.
 """
 
 from typing import List, Any
@@ -12,11 +12,12 @@ from ..shell.commands import b64str
 
 class KerberosModule(BaseModule):
     name = "kerberos"
-    description = "Advanced Kerberos Suite (AES Kerberoasting, AS-REP, Diamond Ticket & dMSA)"
+    description = "Advanced Kerberos Suite (AES Kerberoasting, AS-REP, RBCD, Diamond Ticket & dMSA)"
     author = "uziii2208"
     options = {
         "--roast": {"desc": "Run in-memory Kerberoasting with AES256 priority"},
         "--asrep": {"desc": "Enumerate accounts vulnerable to AS-REP roasting (DONT_REQ_PREAUTH)"},
+        "--rbcd": {"desc": "Enumerate Resource-Based Constrained Delegation (RBCD) targets"},
         "--dmsa": {"desc": "Audit Server 2025 Delegated Managed Service Accounts (dMSA)"},
         "--diamond": {"desc": "Display Diamond Ticket crafting workflow & parameters"},
     }
@@ -71,8 +72,23 @@ if ($spns.Count -eq 0) {
     }
 }
 
-# 3. Server 2025 dMSA & gMSA Inspection
-Write-Host "`n[3. Server 2025 dMSA / BadSuccessor & gMSA Accounts]" -ForegroundColor Yellow
+# 3. RBCD (Resource-Based Constrained Delegation) & Delegation Scout
+Write-Host "`n[3. Resource-Based Constrained Delegation (RBCD) Targets]" -ForegroundColor Yellow
+$rbcdSearcher = New-Object System.DirectoryServices.DirectorySearcher
+$rbcdSearcher.Filter = "(msDS-AllowedToActOnBehalfOfOtherIdentity=*)"
+$rbcdTargets = $rbcdSearcher.FindAll()
+
+if ($rbcdTargets.Count -eq 0) {
+    Write-Host "  [+] No RBCD-configured objects discovered." -ForegroundColor Green
+} else {
+    foreach ($r in $rbcdTargets) {
+        $u = $r.Properties["samaccountname"][0]
+        Write-Host "  [!] RBCD Configured Target: $u (msDS-AllowedToActOnBehalfOfOtherIdentity present)" -ForegroundColor Red
+    }
+}
+
+# 4. Server 2025 dMSA & gMSA Inspection
+Write-Host "`n[4. Server 2025 dMSA / BadSuccessor & gMSA Accounts]" -ForegroundColor Yellow
 $gmsaSearcher = New-Object System.DirectoryServices.DirectorySearcher
 $gmsaSearcher.Filter = "(|(objectClass=msDS-GroupManagedServiceAccount)(objectClass=msDS-ManagedServiceAccount))"
 $gmsas = $gmsaSearcher.FindAll()

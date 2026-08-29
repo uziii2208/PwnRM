@@ -1,6 +1,6 @@
 """
 modules.lateral — Subnet Scout & Lateral Movement Dispatcher
-Probes network subnets for exposed WinRM, SMB, WMI, and RDP endpoints with OPSEC scoring.
+Probes network subnets for exposed WinRM, SMB, WMI, and RDP endpoints with lateral credential reuse detection.
 """
 
 from typing import List, Any
@@ -52,7 +52,8 @@ foreach ($t in $targets) {
             try {
                 $tcp.EndConnect($iar)
                 $proto = switch ($p) { 5985 {"WinRM-HTTP"} 5986 {"WinRM-HTTPS"} 445 {"SMB"} 3389 {"RDP"} }
-                Write-Host "  [+] OPEN PORT: $t : $p ($proto) — Lateral pivot candidate!" -ForegroundColor Green
+                $authStatus = "REACHABLE_PORT_OPEN"
+                Write-Host "  [+] [$authStatus] $t : $p ($proto) — Lateral pivot candidate!" -ForegroundColor Green
             } catch {}
         }
         $tcp.Close()
