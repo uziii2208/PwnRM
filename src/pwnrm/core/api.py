@@ -157,6 +157,6 @@ def create_transport(args: Namespace) -> Transport:
     if getattr(args,"hash",""):
         nt_hash = args.hash.split(":")[-1]
     creds = NTCredential(domain, username, password, nt_hash)
-    logging.info(f"[+] SPNEGO transport as {domain}\\{username} "
-                 f"({'NTLM' if not nt_hash else 'PtH'})")
+    auth_method = "PtH" if nt_hash else "NTLM"
+    logging.info(f"[+] SPNEGO transport as {domain}\\{username} ({auth_method})")
     return SPNEGOTransport(url, creds)

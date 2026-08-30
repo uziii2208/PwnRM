@@ -77,7 +77,7 @@ except OSError:
 
 # [OPT-08] Sensitive pattern filter to prevent storing credentials in history
 HISTORY_EXCLUDE_PATTERN = re.compile(
-    r'(?:-p|-password|--password|-H|-hash|--hash|--pfx-pass|password|passwd|secret|tgskey|nt_hash)',
+    r'(?:-p|-password|--password|-H|-hash|--hash|--pfx-pass|password|passwd|secret|tgskey|nt_hash|mimikatz|secretsdump|lsass|ccache|kirbi|dpapi)',
     re.IGNORECASE
 )
 

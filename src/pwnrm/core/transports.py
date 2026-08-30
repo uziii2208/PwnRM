@@ -5,6 +5,7 @@ core.transports — HTTP/HTTPS & WebSocket transport layer (Basic, Cert, SPNEGO,
 import ssl
 import logging
 import secrets
+import hmac
 from base64    import b64decode
 from struct    import pack, unpack
 from urllib.parse import urlparse
@@ -79,6 +80,7 @@ class Transport:
         self.ssl     = urlparse(url).scheme in ("https", "wss")
         self.session = Session()
         self.session.max_redirects = 0   # SECURITY: WinRM never redirects; block SSRF
+        self.session.trust_env = False   # SECURITY: Ignore ambient environment proxies
         self.session.verify = False
         self.session.headers["User-Agent"]      = SKIP_HEADER
         self.session.headers["Accept-Encoding"] = SKIP_HEADER
@@ -340,7 +342,7 @@ class CredSSPTransport(Transport):
                     b"CredSSP Server-To-Client Binding Hash\x00" + nonce + pubkey
                 ).digest()
 
-            if unwrapped_auth != srv_expected:
+            if not hmac.compare_digest(unwrapped_auth, srv_expected):
                 raise TransportError(
                     "CredSSP: server pubKeyAuth mismatch — possible MitM detected, aborting!"
                 )

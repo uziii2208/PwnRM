@@ -1,0 +1,209 @@
+name: Security Audit Pipeline
+
+on:
+  push:
+    branches: [master, main, dev, "release/*"]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    - cron: "0 3 * * 1" # Weekly Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      audit_level:
+        description: "Audit Depth Level"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - quick
+          - full
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    name: Setup & Environment Validation
+    runs-on: ubuntu-latest
+    outputs:
+      python_files: ${{ steps.list_files.outputs.files }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Package & Testing Dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e .
+          pip install pytest pytest-json-report
+
+      - name: Discover Python Source Files
+        id: list_files
+        run: |
+          FILES=$(find src/ tests/ -name "*.py" | tr '\n' ' ')
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "Discovered files: $FILES"
+
+  unit_and_regression:
+    name: Unit & Security Regression Tests
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Package Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest pytest-json-report
+
+      - name: Run Test Suite
+        run: |
+          PYTHONPATH=src python -m pytest tests/ -v --tb=short --json-report --json-report-file=test_results.json
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test_results.json
+          retention-days: 14
+
+  custom_security_audit:
+    name: AST & Custom Security Audits
+    needs: unit_and_regression
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create Audit Output Directory
+        run: mkdir -p audit_output
+
+      - name: Execute Custom Security Audits
+        id: audit_run
+        env:
+          AUDIT_LEVEL: ${{ github.event.inputs.audit_level || 'full' }}
+        run: |
+          python .github/scripts/run_all_audits.py
+
+      - name: Upload Audit JSON Outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-json-output
+          path: audit_output/
+          retention-days: 30
+
+  dependency_audit:
+    name: Dependency & Known CVE Audit
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install pip-audit & Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+          pip install -e .
+
+      - name: Run pip-audit on Installed Dependencies
+        run: |
+          pip-audit --desc on
+
+      - name: Verify Requirements Pinning & Consistency
+        run: |
+          python -c "
+          import re, sys
+          from pathlib import Path
+
+          req_file = Path('requirements.txt')
+          pyproj_file = Path('pyproject.toml')
+
+          if not req_file.exists() or not pyproj_file.exists():
+              sys.exit('requirements.txt or pyproject.toml missing')
+
+          req_lines = [l.strip() for l in req_file.read_text().splitlines() if l.strip() and not l.startswith('#')]
+          print(f'Checking {len(req_lines)} dependencies in requirements.txt...')
+
+          unpinned = []
+          for r in req_lines:
+              if '>=' in r and '<' not in r and '==' not in r:
+                  unpinned.append(r)
+
+          if unpinned:
+              print(f'WARNING: Unpinned or unbounded dependencies found: {unpinned}')
+          else:
+              print('Dependency version specification check passed.')
+          "
+
+  report_and_annotate:
+    name: Build Security Report & PR Annotations
+    needs: custom_security_audit
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download Audit Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: audit-json-output
+          path: audit_output/
+
+      - name: Generate HTML & JSON Audit Reports
+        run: |
+          python .github/scripts/audit_report.py
+
+      - name: Upload Security Report Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-report
+          path: |
+            audit_report.html
+            audit_report.json
+          retention-days: 30
