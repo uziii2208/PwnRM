@@ -9,31 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.0] - 2026-08-30
 
-### Next-Gen Post-Exploitation Suite (VSS, Coercion, LAPS, ACL & Token Impersonation)
+### Next-Gen Post-Exploitation Suite & Autonomous CI/CD Security Audit Pipeline
 
-This release expands PwnRM into an elite operator platform with 5 new specialized attack modules, in-memory credential extraction bypassing EDR, coerced authentication triggers, Server 2025 LAPS hunting, DACL privilege escalation analysis, polymorphic backtick command obfuscation, and hardened SOCKS5 multiplexing.
+This major release elevates PwnRM into an elite operator platform featuring 5 new specialized attack modules, in-memory credential extraction bypassing EDR, coerced authentication triggers, Server 2025 LAPS hunting, DACL privilege escalation analysis, polymorphic backtick command obfuscation, hardened SOCKS5 multiplexing, and a completely custom, self-contained GitHub Actions CI/CD Security Audit Pipeline (0 third-party SAST dependencies).
 
-### Added & Enhanced
+### Added & Enhanced (New Modules & Operator TTPs)
 - **In-Memory VSS Shadow Copy Extractor (`!vss`)**:
-  - Direct WMI / CIM reflection (`Win32_ShadowCopy`) to extract active `SAM`, `SYSTEM`, and `NTDS.dit` hives without executing `vssadmin.exe` or `ntdsutil.exe` (completely evading EDR process creation telemetry).
-  - Automated post-extraction cleanup instantly deleting shadow copies to maintain forensic hygiene.
+  - Direct WMI / CIM reflection (`[wmiclass]"Win32_ShadowCopy"`) to extract active `SAM`, `SYSTEM`, and `NTDS.dit` hives without executing `vssadmin.exe` or `ntdsutil.exe` (completely evading EDR process creation telemetry).
+  - Automated post-extraction cleanup instantly deleting shadow copies via `.Delete()` to maintain forensic cleanliness.
 - **Coerced Authentication Engine (`!coerce`)**:
-  - Implements multi-vector coerced authentication from the remote target to operator listeners (Responder / ntlmrelayx).
-  - Vectors: WebDAV HTTP UNC paths (bypassing SMB signing for ESC8 Web Enrollment relays), MS-RPRN Print Spooler (`\pipe\spoolss`), MS-EFSR PetitPotam (`\pipe\efsrpc`), and MS-DFSNM (`\pipe\netdfs`).
+  - Implements multi-vector coerced authentication from the remote target to operator listeners (Responder / `ntlmrelayx`).
+  - Vectors: WebDAV HTTP UNC paths (`\\listener@80\share\dummy.txt` bypassing SMB signing for ADCS ESC8 Web Enrollment relays), MS-RPRN Print Spooler (`\pipe\spoolss`), MS-EFSR PetitPotam (`\pipe\efsrpc`), and MS-DFSNM (`\pipe\netdfs`).
 - **Windows LAPS & Server 2025 Hunter (`!laps`)**:
-  - Queries LDAP in-memory for both Legacy LAPS (`ms-Mcs-AdmPwd`) and Modern Windows Server 2025 / Windows 11 LAPS (`msLAPS-Password`, `msLAPS-EncryptedPassword`, `msLAPS-PasswordHistory`).
+  - In-memory LDAP query extracting both Legacy LAPS (`ms-Mcs-AdmPwd`, expiration timestamp) and Modern Windows Server 2025 / Windows 11 Azure LAPS (`msLAPS-Password`, `msLAPS-EncryptedPassword`, `msLAPS-PasswordHistory`).
 - **Active Directory DACL & Privilege Escalation Scout (`!acl`)**:
-  - Audits discretionary access control lists on Tier-0 objects (AdminSDHolder, Domain Admins, Domain Controllers, KRBTGT, GPOs).
+  - Audits discretionary access control lists on Tier-0 objects (`AdminSDHolder`, `Domain Admins`, `Domain Controllers`, `krbtgt`, GPOs).
   - Discovers high-risk access rights (`GenericAll`, `WriteDacl`, `WriteOwner`, `GenericWrite`, `User-Force-Change-Password`).
 - **Process Token Hunter & In-Memory Impersonation (`!token`)**:
   - In-memory process token enumeration across logon sessions and privilege escalation triage (`SeImpersonatePrivilege`, `SeAssignPrimaryTokenPrivilege`, `SeDebugPrivilege`, `SeBackupPrivilege`).
+  - Named pipe client reflection and token duplication (`DuplicateTokenEx`) without binary drops.
 - **Polymorphic PowerShell AST Command Obfuscation (`core.opsec`)**:
-  - Added AST-safe dynamic backtick and whitespace splitting for PowerShell cmdlets when `obfuscate_commands` is active in `stealth` and `hybrid-cloud` profiles.
+  - Added AST-safe dynamic backtick and whitespace splitting for PowerShell cmdlets (`obfuscate_cmd()`) when active in `stealth` and `hybrid-cloud` profiles to defeat static ScriptBlockLogging signatures.
   - Upgraded jitter sleep calculations to use cryptographic random state (`secrets`).
 - **Thread-Safe SOCKS5 Proxy & Port Forwarding Multiplexing (`core.tunnel`)**:
-  - Added thread-safe locking and socket timeout protections preventing deadlocks or memory retention on abrupt client disconnects.
-- **Test Suite Expansion**:
-  - Added 5 dedicated test modules (`test_vss.py`, `test_coerce.py`, `test_laps.py`, `test_acl.py`, `test_token.py`), bringing the test suite to 41 passing unit and security regression tests.
+  - Hardened `Socks5Server` and `PortForwarder` with `threading.Lock()` mutex and socket timeout guards, preventing deadlocks or memory retention on abrupt client disconnects.
+
+### Security Hardening & Core Fixes (Auditor Pass)
+- **CWE-918 (SSRF / Proxy MITM)**: Enforced `session.trust_env = False` across all Transport base classes in `core.transports` to ignore ambient environment proxy variables.
+- **CWE-208 / CWE-385 (Timing Attack)**: Implemented constant-time verification for CredSSP Server-To-Client Binding hash `pubKeyAuth` using `hmac.compare_digest()` in `CredSSPTransport._auth()`.
+- **CWE-532 (Log Exposure)**: Sanitized SPNEGO transport logging in `core.api` to avoid serializing raw credential variable identifiers into `logging.info()`.
+- **CWE-200 / CWE-522 (History Leak)**: Expanded `HISTORY_EXCLUDE_PATTERN` in `shell.pwnshell` to automatically exclude offensive tool and credential keywords (`mimikatz`, `secretsdump`, `lsass`, `ccache`, `kirbi`, `dpapi`).
+
+### Custom CI/CD Security Audit Pipeline (`.github/`)
+- **Main Workflow (`.github/workflows/security_audit.yml`)**: 5-job automated GitHub Actions pipeline (`setup`, `unit_and_regression`, `custom_security_audit`, `dependency_audit`, `report_and_annotate`) triggered on push, pull request, weekly cron, and manual dispatch.
+- **PowerShell Injection Auditor (`.github/scripts/audit_ps_injection.py`)**: AST-based data flow analyzer detecting unescaped PowerShell string interpolations in JoinedStr/f-strings and `.ps1` resources.
+- **Cryptographic Hygiene Auditor (`.github/scripts/audit_crypto.py`)**: Validates CSPRNG usage (`secrets` vs `random`), Fernet key lifecycle, and MD5 integrity boundaries.
+- **Filesystem & Permissions Auditor (`.github/scripts/audit_filesystem.py`)**: Enforces atomic `O_CREAT | O_EXCL` file creation, `0o600` permissions, and history symlink race guards.
+- **XML Deserialization Safety Auditor (`.github/scripts/audit_xml_safety.py`)**: Ensures `defusedxml` wraps all XML deserialization sinks against XXE / Billion Laughs attacks.
+- **Secret & Credential Exposure Auditor (`.github/scripts/audit_secrets_exposure.py`)**: Scans source code, logging calls, and git commits for hardcoded secrets and unpinned dependencies.
+- **Network & Transport Security Auditor (`.github/scripts/audit_network.py`)**: Verifies `max_redirects=0`, `trust_env=False`, `hmac.compare_digest()`, and WebSocket CSPRNG keys.
+- **Interactive Report Builder (`.github/scripts/audit_report.py`)**: Compiles `audit_report.json`, interactive dark-mode `audit_report.html`, and emits inline PR annotations (`::error::` / `::warning::`).
+- **Master Orchestrator (`.github/scripts/run_all_audits.py`)**: Orchestrates all 6 custom auditors, renders a universal ASCII summary table, and enforces fail-fast exit codes (0 on clean, 1 on CRITICAL/HIGH).
+
+### Test Suite
+- Expanded test suite from 26 to **41 automated unit & security regression tests** passing with a **100% success rate**.
 
 ---
 
