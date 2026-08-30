@@ -10,7 +10,7 @@
 ![GitHub issues](https://img.shields.io/github/issues/uziii2208/PwnRM?style=for-the-badge&color=red&logo=github)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge&logo=opensourceinitiative)
 ![PyPI](https://img.shields.io/pypi/v/pwnrm?style=for-the-badge&color=cyan&logo=pypi)
-[![Changelog](https://img.shields.io/badge/Changelog-v2.0.0-blueviolet?style=for-the-badge&logo=git)](CHANGELOG.md)
+[![Changelog](https://img.shields.io/badge/Changelog-v2.0.1-blueviolet?style=for-the-badge&logo=git)](CHANGELOG.md)
 ![Platform](https://img.shields.io/badge/Platform-Cross--Platform-orange?style=for-the-badge&logo=windows)
 [![Documentation](https://img.shields.io/badge/Documentation-Complete_Suite-success?style=for-the-badge&logo=readthedocs)](docs/README.md)
 
