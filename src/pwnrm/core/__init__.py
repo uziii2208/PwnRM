@@ -3,7 +3,7 @@
 from .credentials import NTCredential, KrbCredential, TransportError, SPNEGOError
 from .transports import (
     Transport, BasicTransport, ClientCertTransport,
-    SPNEGOTransport, KerberosTransport, CredSSPTransport
+    SPNEGOTransport, KerberosTransport, CredSSPTransport, WebSocketTransport
 )
 from .runspace import Runspace
 from .api import argument_parser, create_transport
@@ -15,7 +15,7 @@ from .opsec import OPSECProfile
 __all__ = [
     "NTCredential", "KrbCredential", "TransportError", "SPNEGOError",
     "Transport", "BasicTransport", "ClientCertTransport",
-    "SPNEGOTransport", "KerberosTransport", "CredSSPTransport",
+    "SPNEGOTransport", "KerberosTransport", "CredSSPTransport", "WebSocketTransport",
     "Runspace", "argument_parser", "create_transport",
     "SessionManager", "SessionNode",
     "Socks5Server", "PortForwarder",

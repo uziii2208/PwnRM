@@ -40,9 +40,15 @@ This release delivers comprehensive security hardening, vulnerability mitigation
 - **Playbook `on_fail` Cleanup Hooks**: Added automated execution of `cleanup_on_fail` rollback hooks when an automated red team playbook fails mid-execution.
 - **Resource-Based Constrained Delegation (RBCD)**: Added `msDS-AllowedToActOnBehalfOfOtherIdentity` inspection to `!kerberos`.
 - **Enterprise CA Health Check**: Added CA certificate expiration detection and CRL/AIA status checks to `!adcs`.
-- **Lateral Movement Tagging**: Tagged pivot opportunities with structured status markers (`[REACHABLE_PORT_OPEN]`) in `!lateral`.
-- **Type Annotations**: Comprehensive PEP 484 type annotations added across core transports, runspace, session manager, and API modules.
-- **Test Suite Expansion**: 22 unit and security regression tests passing with 100% success rate.
+- **WinRM over WebSocket Transport (`ws://` / `wss://`)**: Added `WebSocketTransport` conforming to MS-WSMV §2.2.9.1 with `Sec-WebSocket-Protocol: soap` for stealthy OPSEC evasion bypassing HTTP SOAP signatures.
+- **Active Lateral WSMan Micro-Probing**: Upgraded `!lateral` with active HTTP/HTTPS WSMan micro-probing, distinguishing `[PWNED / OPEN_ACCESS]`, `[REACHABLE / AUTH_REQUIRED]`, and `[PORT_OPEN]` targets.
+- **BloodHound Active Logon Sessions**: Added in-memory WMI session enumeration (`Win32_LogonSession` + `Win32_LoggedOnUser`) formatted for BloodHound CE v6 session attack path discovery.
+- **`RemoteStreamOptions=0` ETW Blinding**: Enforced `RemoteStreamOptions=0` in PSRP pipeline creation to block supplementary information and debug streams directly at the remoting layer.
+- **Playbook Conditional Branching DSL**: Added `when` conditional execution, variable output capture (`capture_as`), and `on_fail: continue|abort` handlers in `!playbook`.
+- **In-Memory DPAPI Reflection Unprotect**: Added reflection-based `CryptUnprotectData` bridge in `!creds` to decrypt DPAPI data in-memory without dropping binaries to disk.
+- **Dead Reckoning Replay Mode (`--replay`)**: Added `--replay <logfile>` CLI capability to parse transcript logs and replay execution sequences seamlessly after unexpected disconnects.
+- **Transcript Session Boundary Markers**: Added structured timestamped `SESSION SWITCH` boundary markers to stdout transcripts.
+- **Test Suite Expansion**: 26 unit and security regression tests passing with 100% success rate.
 
 ---
 

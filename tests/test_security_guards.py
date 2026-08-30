@@ -2,11 +2,16 @@
 tests.test_security_guards — Security regression tests & anti-hallucination boundary checks
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 from pwnrm.shell.pwnshell import PwnShell, HISTORY_EXCLUDE_PATTERN
 from pwnrm.shell.commands import build_amsi_patch, _xor_key, split_args
 from pwnrm.shell.shares import get_shares_ps
 from pwnrm.core.utils import strip_ansi, utfstr
+from pwnrm.core.transports import WebSocketTransport
+from pwnrm.modules.playbook import PlaybookModule
+from pwnrm.cli import parse_replay_log
 import pwnrm.core.psrp as psrp
 import defusedxml.ElementTree as _defusedET
 
@@ -98,6 +103,41 @@ class TestSecurityGuards(unittest.TestCase):
         # Invalid sequence should not throw unhandled exception
         result = utfstr("_xZZZZ_invalid")
         self.assertEqual(result, "_xZZZZ_invalid")
+
+    def test_websocket_transport_headers(self):
+        # WebSocket transport must set Upgrade and Sec-WebSocket headers
+        ws = WebSocketTransport("http://192.168.1.10:5985/wsman")
+        self.assertEqual(ws.session.headers.get("Upgrade"), "websocket")
+        self.assertEqual(ws.session.headers.get("Connection"), "Upgrade")
+        self.assertEqual(ws.session.headers.get("Sec-WebSocket-Protocol"), "soap")
+        self.assertEqual(ws.session.headers.get("Sec-WebSocket-Version"), "13")
+
+    def test_remote_stream_options_zero(self):
+        # RemoteStreamOptions must be 0 to block supplementary ETW stream forwarding
+        pipeline_el = psrp.ps_create_pipeline([])
+        xml_str = psrp.ET.tostring(pipeline_el, encoding="unicode")
+        self.assertIn('N="RemoteStreamOptions"', xml_str)
+        self.assertIn('<I32>0</I32>', xml_str)
+
+    def test_playbook_conditional_branching(self):
+        context = {"triage": "Found Kerberoastable SPN accounts and ADCS CA"}
+        self.assertTrue(PlaybookModule._evaluate_condition("triage contains 'SPN'", context, ""))
+        self.assertTrue(PlaybookModule._evaluate_condition("triage contains 'ADCS'", context, ""))
+        self.assertFalse(PlaybookModule._evaluate_condition("triage contains 'NonExistent'", context, ""))
+
+    def test_replay_log_parser(self):
+        with tempfile.TemporaryDirectory() as td:
+            log_file = Path(td) / "transcript.log"
+            log_file.write_text(
+                "==================\nPwnRM v2.0.1\n"
+                "PS C:\\Users\\Admin> whoami /priv\n"
+                "  [+] SeDebugPrivilege\n"
+                "PS C:\\Users\\Admin> !evasion\n"
+                "PS C:\\Users\\Admin> exit\n",
+                encoding="utf-8"
+            )
+            cmds = parse_replay_log(str(log_file))
+            self.assertEqual(cmds, ["whoami /priv", "!evasion"])
 
 
 if __name__ == "__main__":

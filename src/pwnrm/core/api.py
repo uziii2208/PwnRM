@@ -81,6 +81,8 @@ def argument_parser() -> ArgumentParser:
     # Execution
     parser.add_argument("-X", metavar="CMD",
         help="Execute single command and exit (non-interactive)")
+    parser.add_argument("--replay", metavar="LOGFILE",
+        help="Dead Reckoning replay mode: replay command sequence from session transcript log")
     # Misc
     parser.add_argument("--ts",    action="store_true", help="Add timestamps to log output")
     parser.add_argument("--debug", action="store_true", help="Verbose / debug output")

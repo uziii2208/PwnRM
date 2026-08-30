@@ -1,16 +1,36 @@
 """
-pwnrm.cli — CLI entry point
+pwnrm.cli — CLI entry point & Dead Reckoning replay dispatcher
 """
 
 import sys
+import re
 import logging
+from pathlib import Path
 from datetime import datetime
 from impacket import version
 from impacket.examples import logger
 
 from .core       import Runspace, create_transport, argument_parser
 from .shell      import PwnShell
-from .shell.ui   import _BANNER, c, DIM
+from .shell.ui   import _BANNER, c, DIM, Y, G, R, BLD
+
+
+def parse_replay_log(log_path: str) -> list[str]:
+    """Extracts executable commands from a PwnRM transcript log."""
+    path = Path(log_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Replay log not found: {log_path}")
+    commands = []
+    # Match lines like "PS C:\Users\Admin> whoami" or raw operator inputs
+    cmd_re = re.compile(r"^PS\s+[^>]+>\s*(.+)$")
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        m = cmd_re.match(line)
+        if m:
+            cmd = m.group(1).strip()
+            if cmd and not cmd.startswith("exit") and not cmd.startswith("quit"):
+                commands.append(cmd)
+    return commands
 
 
 def main():
@@ -43,7 +63,13 @@ def main():
         with Runspace(transport, timeout) as runspace:
             shell = PwnShell(runspace, target_info=tinfo)
             try:
-                if args.X:
+                if args.replay:
+                    replayed_cmds = parse_replay_log(args.replay)
+                    print(c(Y + BLD, f"\n  [⚡] Dead Reckoning Replay: executing {len(replayed_cmds)} commands from {args.replay}...\n"))
+                    shell.repl(iter(replayed_cmds))
+                    print(c(G + BLD, f"\n  [+] Replay sequence completed. Entering interactive session.\n"))
+                    shell.repl()
+                elif args.X:
                     shell.repl(iter([args.X]))
                 else:
                     shell.help()

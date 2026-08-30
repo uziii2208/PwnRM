@@ -376,12 +376,25 @@ class PwnShell:
         elif subcmd == "switch" and len(args) > 1:
             try:
                 sid = int(args[1])
+                old_node = self.session_mgr.get_current()
+                old_sid = old_node.session_id if old_node else -1
+                old_host = old_node.host if old_node else "unknown"
                 if self.session_mgr.switch_session(sid):
                     node = self.session_mgr.get_current()
                     self.runspace = node.runspace
                     self.target_info = node.target_info
                     self.update_cwd()
                     self.write_info(c(G, f"  [+] Switched to session {sid} ({node.host})"))
+                    if self.stdout_log:
+                        marker = (
+                            f"\n{'─'*72}\n"
+                            f"[{datetime.now().isoformat()}] SESSION SWITCH\n"
+                            f"  FROM : S:{old_sid} ({old_host})\n"
+                            f"  TO   : S:{sid} ({node.host})\n"
+                            f"{'─'*72}\n"
+                        )
+                        self.stdout_log.write(marker.encode("utf-8"))
+                        self.stdout_log.flush()
                 else:
                     self.write_warning(f"Session {sid} not found.")
             except ValueError:

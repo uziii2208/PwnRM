@@ -12,7 +12,7 @@ from .core import (
     Runspace, create_transport, argument_parser,
     NTCredential, KrbCredential, TransportError, SPNEGOError,
     Transport, BasicTransport, ClientCertTransport,
-    SPNEGOTransport, KerberosTransport, CredSSPTransport,
+    SPNEGOTransport, KerberosTransport, CredSSPTransport, WebSocketTransport,
     SessionManager, SessionNode, Socks5Server, PortForwarder,
     LootManager, OPSECProfile,
 )
@@ -22,10 +22,10 @@ from .modules import BaseModule, ModuleManager
 __all__ = [
     "__version__",
     # core
-    "Runspace", "create_transport", "argument_parser",
     "NTCredential", "KrbCredential", "TransportError", "SPNEGOError",
     "Transport", "BasicTransport", "ClientCertTransport",
-    "SPNEGOTransport", "KerberosTransport", "CredSSPTransport",
+    "SPNEGOTransport", "KerberosTransport", "CredSSPTransport", "WebSocketTransport",
+    "Runspace", "argument_parser", "create_transport",
     "SessionManager", "SessionNode",
     "Socks5Server", "PortForwarder",
     "LootManager", "OPSECProfile",

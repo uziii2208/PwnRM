@@ -1,6 +1,6 @@
 """
 modules.lateral — Subnet Scout & Lateral Movement Dispatcher
-Probes network subnets for exposed WinRM, SMB, WMI, and RDP endpoints with lateral credential reuse detection.
+Probes network subnets for exposed WinRM, SMB, WMI, and RDP endpoints with lateral credential & WSMan micro-probing.
 """
 
 from typing import List, Any
@@ -11,15 +11,16 @@ from ..shell.commands import b64str
 
 class LateralModule(BaseModule):
     name = "lateral"
-    description = "Subnet Scout & Lateral Movement Dispatcher (WinRM, SMB, WMI, RDP)"
+    description = "Subnet Scout & Lateral Movement Dispatcher (WinRM, SMB, WMI, RDP with Auth Probing)"
     author = "uziii2208"
     options = {
         "--subnet": {"desc": "Target subnet to scan (default: local /24 subnet)"},
         "--ports": {"desc": "Custom ports to probe (default: 5985, 5986, 445, 135, 3389)"},
+        "--probe-auth": {"desc": "Execute active WinRM WS-Management auth micro-probe"},
     }
 
     def run(self, shell, args: List[str]) -> Any:
-        shell.write_info(c(M + BLD, "  [*] PwnRM Lateral Movement Engine — probing local network segment..."))
+        shell.write_info(c(M + BLD, "  [*] PwnRM Lateral Movement Engine — probing local network segment with WSMan micro-probe..."))
 
         ps = r"""
 $ErrorActionPreference = 'SilentlyContinue'
@@ -52,8 +53,40 @@ foreach ($t in $targets) {
             try {
                 $tcp.EndConnect($iar)
                 $proto = switch ($p) { 5985 {"WinRM-HTTP"} 5986 {"WinRM-HTTPS"} 445 {"SMB"} 3389 {"RDP"} }
-                $authStatus = "REACHABLE_PORT_OPEN"
-                Write-Host "  [+] [$authStatus] $t : $p ($proto) — Lateral pivot candidate!" -ForegroundColor Green
+                
+                # If WinRM port, execute WSMan identify micro-probe
+                if ($p -in @(5985, 5986)) {
+                    $scheme = if ($p -eq 5986) { "https" } else { "http" }
+                    $wsmanUrl = "$scheme://$t`:$p/wsman"
+                    try {
+                        $req = [System.Net.WebRequest]::Create($wsmanUrl)
+                        $req.Method = "POST"
+                        $req.Timeout = 500
+                        $req.ContentType = "application/soap+xml;charset=UTF-8"
+                        $req.UserAgent = "Microsoft WinRM Client"
+                        $resp = $req.GetResponse()
+                        $statusCode = [int]$resp.StatusCode
+                        $resp.Close()
+                        Write-Host "  [!] [PWNED / OPEN_ACCESS] $t : $p ($proto) — Status $statusCode (Unauthenticated WSMan Accessible!)" -ForegroundColor Red
+                    } catch [System.Net.WebException] {
+                        $webResp = $_.Exception.Response
+                        if ($webResp) {
+                            $code = [int]$webResp.StatusCode
+                            if ($code -eq 401) {
+                                Write-Host "  [+] [REACHABLE / AUTH_REQUIRED] $t : $p ($proto) — WinRM Online (Ready for Pass-The-Hash / Kerberoast)" -ForegroundColor Green
+                            } else {
+                                Write-Host "  [*] [REACHABLE] $t : $p ($proto) — HTTP Status $code" -ForegroundColor Yellow
+                            }
+                            $webResp.Close()
+                        } else {
+                            Write-Host "  [*] [PORT_OPEN] $t : $p ($proto) — TCP Connection Established" -ForegroundColor Gray
+                        }
+                    } catch {
+                        Write-Host "  [*] [PORT_OPEN] $t : $p ($proto) — TCP Connection Established" -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host "  [+] [PORT_OPEN] $t : $p ($proto) — Lateral pivot candidate!" -ForegroundColor Green
+                }
             } catch {}
         }
         $tcp.Close()

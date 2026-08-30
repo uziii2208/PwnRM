@@ -169,6 +169,11 @@ class Runspace:
             yield {"error": err_msg}
         finally:
             self.command_id = None
+            try:
+                if "ps" in locals() and hasattr(ps, "output") and hasattr(ps.output, "clear"):
+                    ps.output.clear()
+            except Exception:
+                pass
 
     # ── Interrupt (Ctrl+C) ───────────────────────────────────────────────────
     def interrupt(self):

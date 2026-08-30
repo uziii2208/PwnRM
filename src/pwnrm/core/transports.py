@@ -1,5 +1,5 @@
 """
-core.transports — HTTP/HTTPS transport layer (Basic, Cert, SPNEGO, Kerberos, CredSSP)
+core.transports — HTTP/HTTPS & WebSocket transport layer (Basic, Cert, SPNEGO, Kerberos, CredSSP, WebSocket)
 """
 
 import ssl
@@ -76,7 +76,7 @@ class TSCredentials(univ.Sequence):
 class Transport:
     def __init__(self, url: str):
         self.url     = url
-        self.ssl     = urlparse(url).scheme == "https"
+        self.ssl     = urlparse(url).scheme in ("https", "wss")
         self.session = Session()
         self.session.max_redirects = 0   # SECURITY: WinRM never redirects; block SSRF
         self.session.verify = False
@@ -84,11 +84,6 @@ class Transport:
         self.session.headers["Accept-Encoding"] = SKIP_HEADER
 
     def send(self, req: bytes | str) -> bytes:
-        # _TooManyRedirects is raised by requests when max_redirects=0 fires
-        # inside resolve_redirects(yield_requests=True) even with allow_redirects=False
-        # (requests ≥2.32 always calls that generator to populate r._next).
-        # Convert it to TransportError so the caller gets a clean diagnostic instead
-        # of an uncaught exception traceback.
         try:
             rsp = self._send(req)
             if rsp.status_code == 401:
@@ -98,245 +93,232 @@ class Transport:
             raise TransportError(
                 f"Server issued HTTP redirect — SSRF attempt blocked: {e}"
             ) from e
-        if rsp.status_code in (301, 302, 303, 307, 308):
-            raise TransportError(
-                f"Unexpected HTTP redirect ({rsp.status_code}) to "
-                f"{rsp.headers.get('Location', '?')} — "
-                "WinRM does not support redirects (possible SSRF attempt)"
-            )
-        if rsp.status_code not in (200, 500):
-            raise TransportError(f"Unexpected HTTP {rsp.status_code}")
+        except Exception as e:
+            raise TransportError(e) from e
         return rsp.content
 
-    def _send_auth(self, req: bytes, proto: str, phase: str = "") -> bytes:
-        # allow_redirects=False prevents the session from *following* redirects,
-        # but requests ≥2.32 still calls resolve_redirects(yield_requests=True) to
-        # set r._next even when following is disabled. With max_redirects=0, that
-        # internal call raises TooManyRedirects before we get the response object.
-        # Catch it and raise a TransportError so the caller receives a clean message.
-        try:
-            rsp = self.session.post(self.url,
-                                    headers={"Authorization": f"{proto} {b64str(req)}"},
-                                    allow_redirects=False,
-                                    timeout=30)
-        except _TooManyRedirects as e:
-            raise TransportError(
-                f"Server issued HTTP redirect during {proto} handshake — "
-                f"SSRF attempt blocked: {e}"
-            ) from e
-        www_auth = rsp.headers.get("WWW-Authenticate","")
-        if rsp.status_code == 200 and not www_auth:
-            return b""
-        if not www_auth.startswith(f"{proto} "):
-            raise TransportError(f"{proto}: {phase}")
-        return b64decode(www_auth[len(proto)+1:])
+    def _send(self, req: bytes | str) -> Any:
+        body = req.encode("utf-8") if isinstance(req, str) else req
+        r = Request("POST", self.url, data=body,
+                    headers={"Content-Type": "application/soap+xml;charset=UTF-8"})
+        prep = self.session.prepare_request(r)
+        return self.session.send(prep, allow_redirects=False)
 
-    def _encrypted_request(self, req: bytes | str, proto: str, wrap_fn: Callable):
-        protocol = f"application/HTTP-{proto}-session-encrypted"
-        data = b""
-        raw_req = req.encode("utf-8") if isinstance(req, str) else req
-        for chunk in chunks(raw_req, 16384):
-            data += b"--Encrypted Boundary\r\n"
-            data += f"Content-Type: {protocol}\r\n".encode()
-            data += (f"OriginalContent: type=application/soap+xml;"
-                     f"charset=UTF-8;Length={len(chunk)}\r\n").encode()
-            data += b"--Encrypted Boundary\r\n"
-            sig, enc = wrap_fn(chunk)
-            data += b"Content-Type: application/octet-stream\r\n" + pack("<I", len(sig)) + sig + enc
-        data += b"--Encrypted Boundary--\r\n"
-        return self.session.prepare_request(Request("POST", url=self.url, data=data, headers={
-            "Content-Type": f'multipart/x-multi-encrypted;protocol="{protocol}";'
-                             f'boundary="Encrypted Boundary"'
-        }))
-
-    def _decrypted_response(self, rsp, unwrap_fn: Callable):
-        if rsp.status_code not in (200, 500):
-            return rsp
-        # If response is not encrypted (e.g. plaintext SOAP fault), return raw
-        if b"--Encrypted Boundary" not in rsp.content:
-            return rsp
-        pref_space = b"\r\nContent-Type: application/octet-stream\r\n"
-        pref_tab   = b"\r\n\tContent-Type: application/octet-stream\r\n"
-        plaintext  = b""
-        for i, part in enumerate(rsp.content.split(b"--Encrypted Boundary")):
-            for pref in (pref_space, pref_tab):
-                if part.startswith(pref):
-                    part = part[len(pref):]
-                    break
-            else:
-                continue
-            if len(part) < 4: continue
-            sig_len = unpack("<I", part[:4])[0]
-            if len(part) < 4 + sig_len: continue
-            try:
-                plaintext += unwrap_fn(part[4:4+sig_len], part[4+sig_len:])
-            except Exception as e:
-                logging.debug(f"Decrypt part {i}: {e}")
-                raise TransportError(f"Transport decryption failure: {e}") from e
-        rsp.headers["Content-Type"]   = "application/soap+xml;charset=UTF-8"
-        rsp.headers["Content-Length"] = str(len(plaintext))
-        rsp._content = plaintext
-        return rsp
+    def _auth(self):
+        pass
 
 
-# ── Concrete transports ──────────────────────────────────────────────────────
+# ── Basic auth ────────────────────────────────────────────────────────────────
 class BasicTransport(Transport):
-    def __init__(self, url: str, username: str, password: str):
+    def __init__(self, url: str, creds: NTCredential):
         super().__init__(url)
-        self.session.auth = (username, password)
-    def _send(self, req):
-        return self.session.post(self.url, data=req,
-                                 headers={"Content-Type":"application/soap+xml;charset=UTF-8"},
-                                 allow_redirects=False,
-                                 timeout=30)
-    def _auth(self): pass
+        token = b64str(f"{creds.username}:{creds.password}".encode())
+        self.session.headers["Authorization"] = f"Basic {token}"
 
 
+# ── Client-certificate mutual TLS ─────────────────────────────────────────────
 class ClientCertTransport(Transport):
-    """
-    Used for HTTPS mutual-authentication.
-    Maps to ADCS abuse paths where the attacker holds a valid client certificate
-    (e.g. from ESC1, ESC9, Shadow Credentials / pywhisker, or a forged cert via
-    certipy forge).
-    """
-    def __init__(self, url: str, cert_pem: str, cert_key: str):
+    def __init__(self, url: str, cert_pem_path: str, cert_key_path: str):
         super().__init__(url)
-        self.session.cert = (cert_pem, cert_key)
-        self.session.headers["Authorization"] = \
-            "http://schemas.dmtf.org/wbem/wsman/1/wsman/secprofile/https/mutual"
-    def _send(self, req):
-        return self.session.post(self.url, data=req,
-                                 headers={"Content-Type":"application/soap+xml;charset=UTF-8"},
-                                 allow_redirects=False,
-                                 timeout=30)
-    def _auth(self): pass
+        self.session.cert = (cert_pem_path, cert_key_path)
 
 
+# ── SPNEGO (NTLM / Kerberos) ─────────────────────────────────────────────────
 class SPNEGOTransport(Transport):
-    """NTLM or Kerberos wrapped in SPNEGO with channel binding (EPA)."""
     def __init__(self, url: str, creds: NTCredential | KrbCredential):
         super().__init__(url)
         self.creds = creds
-        if self.ssl:
-            cert     = SHA256.new(get_server_certificate(url)).digest()
-            app_data = b"tls-server-end-point:" + cert
-            self.gss_bindings = MD5.new(bytes(16) + pack("<I", len(app_data)) + app_data).digest()
-        else:
-            self.gss_bindings = None
+        self.proxy: SPNEGOProxyNTLM | SPNEGOProxyKerberos | None = None
         self._auth()
 
-    def _send(self, req):
-        rsp = self.session.send(self._encrypted_request(req, "SPNEGO", self.proxy.wrap), timeout=30)
-        return self._decrypted_response(rsp, self.proxy.unwrap)
-
     def _auth(self):
-        self.proxy  = (SPNEGOProxyNTLM(self.creds, self.gss_bindings)
-                       if isinstance(self.creds, NTCredential)
-                       else SPNEGOProxyKerberos(self.creds, self.gss_bindings))
-        token_out   = self.proxy.step()
-        while not self.proxy.complete:
-            token_in  = self._send_auth(token_out, "Negotiate", "SPNEGO")
-            token_out = self.proxy.step(token_in)
+        cbt = None
+        if self.ssl:
+            cert = get_server_certificate(self.url)
+            cbt  = "tls-server-end-point:" + SHA256.new(cert).hexdigest()
+
+        if isinstance(self.creds, NTCredential):
+            self.proxy = SPNEGOProxyNTLM(
+                self.creds.username, self.creds.password,
+                self.creds.domain,   self.creds.nt_hash, cbt=cbt
+            )
+        elif isinstance(self.creds, KrbCredential):
+            self.proxy = SPNEGOProxyKerberos(
+                self.creds.domain, self.creds.username,
+                self.creds.ticket, self.creds.tgskey, cbt=cbt
+            )
+
+        token = self.proxy.step()
+        self.session.headers["Authorization"] = f"Negotiate {b64str(token)}"
+        r = self._send(b"")
+
+        if r.status_code == 401:
+            token = self.proxy.step(b64decode(r.headers["WWW-Authenticate"][10:]))
+            self.session.headers["Authorization"] = f"Negotiate {b64str(token)}"
+
+    def send(self, req: bytes | str) -> bytes:
+        sig, msg = self.proxy.wrap(req.encode() if isinstance(req, str) else req)
+        boundary = "Encrypted Boundary"
+        body = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/HTTP-SPNEGO-session-params\r\n"
+            f"OriginalContent: type=application/soap+xml;charset=UTF-8;Length={len(req)}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: application/octet-stream\r\n"
+            f"{sig}{msg}"
+            f"--{boundary}--\r\n"
+        )
+        r = Request("POST", self.url, data=body, headers={
+            "Content-Type": f"multipart/encrypted;protocol=\"application/HTTP-SPNEGO-session-params\";boundary=\"{boundary}\""
+        })
+        prep = self.session.prepare_request(r)
+        resp = self.session.send(prep, allow_redirects=False)
+        parts = resp.content.split(f"--{boundary}".encode())[1:-1]
+        raw_msg = b"".join(parts[1].split(b"\r\n")[3:])
+        return self.proxy.unwrap(raw_msg[:16], raw_msg[16:])
 
 
+# ── Kerberos (GSS-API wire tokens per RFC 4121) ──────────────────────────────
 class KerberosTransport(Transport):
-    """
-    Pure Kerberos transport (Authorization: Kerberos header).
-    Preferred over NTLM on modern AD — use with KRB5CCNAME or --ccache.
-    """
     def __init__(self, url: str, creds: KrbCredential):
         super().__init__(url)
         self.creds = creds
+        self.proxy: SPNEGOProxyKerberos | None = None
+        self._auth()
+
+    def _auth(self):
+        cbt = None
         if self.ssl:
-            cert     = SHA256.new(get_server_certificate(url)).digest()
-            app_data = b"tls-server-end-point:" + cert
-            self.gss_bindings = MD5.new(bytes(16) + pack("<I", len(app_data)) + app_data).digest()
-        else:
-            self.gss_bindings = None
-        self._auth()
+            cert = get_server_certificate(self.url)
+            cbt  = "tls-server-end-point:" + SHA256.new(cert).hexdigest()
 
-    def _send(self, req):
-        rsp = self.session.send(self._encrypted_request(req, "Kerberos", self.proxy.wrap), timeout=30)
-        return self._decrypted_response(rsp, self.proxy.unwrap)
+        spnego_proxy = SPNEGOProxyKerberos(
+            self.creds.domain, self.creds.username,
+            self.creds.ticket, self.creds.tgskey, cbt=cbt
+        )
+        token_init_bytes = spnego_proxy.step()
 
-    def _auth(self):
-        # [OPT-05] RATIONALE: To support pure Kerberos transport without full SPNEGO
-        # framing on the wire, we initialize SPNEGOProxyKerberos to construct the AP_REQ token,
-        # extract the raw MechToken from NegTokenInit, and encode it as a GSS-API Kerberos token
-        # (OID 1.2.840.113554.1.2.2) per RFC 4121 / MS-WSMV §3.2.5.1.
-        self.proxy = SPNEGOProxyKerberos(self.creds, self.gss_bindings)
-        init   = self.proxy.step()
-        ap_req = SPNEGO_NegTokenInit(init)["MechToken"]
-        ap_req = krb5_mech_indep_token_encode("1.2.840.113554.1.2.2", KRB5_AP_REQ + ap_req)
-        rsp    = self._send_auth(ap_req, "Kerberos", "AP_REQ")
-        targ   = SPNEGO_NegTokenResp()
-        targ["NegState"]     = b"\x00"
-        targ["SupportedMech"]= b""
-        targ["ResponseToken"]= rsp
-        self.proxy.step(targ.getData())
+        # Extract Kerberos AP_REQ token and frame per RFC 4121 / MS-WSMV §3.2.5.1
+        neg_token_init = decoder.decode(token_init_bytes, asn1Spec=SPNEGO_NegTokenInit())[0]
+        raw_mech_token = neg_token_init["mechToken"].asOctets()
+        mech_token = decoder.decode(raw_mech_token, asn1Spec=KRB5_AP_REQ())[0]
+        kerb_token = krb5_mech_indep_token_encode(
+            encoder.encode(mech_token),
+            b"\x01\x00"
+        )
+
+        self.session.headers["Authorization"] = f"Kerberos {b64str(kerb_token)}"
+        self.proxy = spnego_proxy
+
+    def send(self, req: bytes | str) -> bytes:
+        sig, msg = self.proxy.wrap(req.encode() if isinstance(req, str) else req)
+        boundary = "Encrypted Boundary"
+        body = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/HTTP-Kerberos-session-params\r\n"
+            f"OriginalContent: type=application/soap+xml;charset=UTF-8;Length={len(req)}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: application/octet-stream\r\n"
+            f"{sig}{msg}"
+            f"--{boundary}--\r\n"
+        )
+        r = Request("POST", self.url, data=body, headers={
+            "Content-Type": f"multipart/encrypted;protocol=\"application/HTTP-Kerberos-session-params\";boundary=\"{boundary}\""
+        })
+        prep = self.session.prepare_request(r)
+        resp = self.session.send(prep, allow_redirects=False)
+        parts = resp.content.split(f"--{boundary}".encode())[1:-1]
+        raw_msg = b"".join(parts[1].split(b"\r\n")[3:])
+        return self.proxy.unwrap(raw_msg[:16], raw_msg[16:])
 
 
+# ── CredSSP transport ────────────────────────────────────────────────────────
 class CredSSPTransport(Transport):
-    """CredSSP — full credential delegation over TLS (ports 5985/5986)."""
-    def __init__(self, url: str, creds: NTCredential | KrbCredential):
+    def __init__(self, url: str, creds: NTCredential):
         super().__init__(url)
-        self.creds = creds
-        self._auth()
-
-    def _send(self, req):
-        rsp = self.session.send(self._encrypted_request(req, "CredSSP", self._wrap), timeout=30)
-        return self._decrypted_response(rsp, self._unwrap)
-
-    def _auth(self):
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode    = ssl.CERT_NONE
-        ctx.options |= ssl.OP_NO_COMPRESSION | 0x00000200 | 0x00000800
+        self.creds   = creds
+        self.tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.tls_ctx.check_hostname = False
+        self.tls_ctx.verify_mode    = ssl.CERT_NONE
         self.tls_in  = ssl.MemoryBIO()
         self.tls_out = ssl.MemoryBIO()
-        self.tls_obj = ctx.wrap_bio(self.tls_in, self.tls_out, server_side=False)
+        self.tls_obj = self.tls_ctx.wrap_bio(self.tls_in, self.tls_out)
+        self._auth()
+
+    def _auth(self):
+        def _send_credssp(tsreq, phase_name="handshake"):
+            encoded_req = b64str(encoder.encode(tsreq))
+            self.session.headers["Authorization"] = f"CredSSP {encoded_req}"
+            r = self._send(b"")
+            if "WWW-Authenticate" in r.headers:
+                raw = r.headers["WWW-Authenticate"]
+                if raw.lower().startswith("credssp "):
+                    try:
+                        return decoder.decode(b64decode(raw[8:]), asn1Spec=TSRequest())[0]
+                    except Exception as e:
+                        raise TransportError(f"CredSSP: malformed token in {phase_name}: {e}") from e
+            return None
+
+        proxy = SPNEGOProxyNTLM(
+            self.creds.username, self.creds.password,
+            self.creds.domain,   self.creds.nt_hash
+        )
+
+        tsreq  = TSRequest.nego_response(proxy.step(), version=6)
+        tsrsp1 = _send_credssp(tsreq, "NTLM Negotiate")
+        if not tsrsp1 or not tsrsp1["negoTokens"].hasValue():
+            raise TransportError("CredSSP: no negoToken returned from server on step 1")
+
+        server_version = int(tsrsp1["version"]) if tsrsp1["version"].hasValue() else 6
+        challenge_token = tsrsp1["negoTokens"][0]["negoToken"].asOctets()
+        auth_token      = proxy.step(challenge_token)
+
         while True:
-            try: self.tls_obj.do_handshake()
-            except Exception: pass
-            if req := self.tls_out.read():
-                rsp = self._send_auth(req, "CredSSP", "tls handshake")
-                self.tls_in.write(rsp)
-            else:
+            try:
+                self.tls_obj.do_handshake()
                 break
-        cert   = self.tls_obj.getpeercert(True)
-        if not cert:
-            raise TransportError("CredSSP: TLS handshake incomplete — no server certificate received")
-        pubkey = x509.load_der_x509_certificate(cert).public_key()
-        pubkey = pubkey.public_bytes(Encoding.DER, PublicFormat.PKCS1)
-        nonce  = secrets.token_bytes(32)  # [FIX-05] CSPRNG nonce generation
+            except ssl.SSLWantReadError:
+                out = self.tls_out.read()
+                if out:
+                    pass
+                break
 
-        def _send_credssp(req, phase=""):
-            sig, enc = self._wrap(encoder.encode(req))
-            if rsp := self._send_auth(sig + enc, "CredSSP", phase):
-                rsp = decoder.decode(self._unwrap(b"", rsp), asn1Spec=TSRequest())[0]
-                if rsp["errorCode"].hasValue():
-                    err = int.to_bytes(rsp["errorCode"]._value, length=4, signed=True).hex()
-                    raise TransportError(f"CredSSP: {phase} NT_ERROR=0x{err}")
-            return rsp
+        tls_data = self.tls_out.read()
+        tsreq    = TSRequest.nego_response(auth_token, version=server_version)
+        tsreq["authInfo"] = tls_data
+        tsrsp2   = _send_credssp(tsreq, "NTLM Authenticate + TLS ClientHello")
 
-        proxy = (SPNEGOProxyNTLM(self.creds) if isinstance(self.creds, NTCredential)
-                 else SPNEGOProxyKerberos(self.creds))
-        tsreq = TSRequest.nego_response(proxy.step())
-        tsrsp = _send_credssp(tsreq, "SPNEGO init")
-        
-        # [FIX-09] Check server CredSSP protocol version for legacy v5 compatibility
-        server_version = int(tsrsp["version"]._value) if tsrsp["version"].hasValue() else 6
+        if tsrsp2 and tsrsp2["authInfo"].hasValue():
+            self.tls_in.write(tsrsp2["authInfo"].asOctets())
+            try:
+                self.tls_obj.do_handshake()
+            except ssl.SSLWantReadError:
+                pass
 
-        t3    = proxy.step(tsrsp["negoTokens"][0]["negoToken"].asOctets())
-        tsreq = TSRequest.nego_response(t3, version=server_version)
-        tsreq["clientNonce"] = nonce
+        cert_der = self.tls_obj.getpeercert(binary_form=True)
+        if not cert_der:
+            raise TransportError("CredSSP: failed to retrieve peer certificate from TLS session")
+        cert   = x509.load_der_x509_certificate(cert_der)
+        pubkey = cert.public_key().public_bytes(
+            encoding=Encoding.DER,
+            format=PublicFormat.SubjectPublicKeyInfo
+        )
 
-        # CredSSP v5 and earlier send raw public key bytes instead of the binding hash
+        nonce = secrets.token_bytes(32)
         if server_version < 5:
-            tsreq["pubKeyAuth"] = proxy.wrap(pubkey, joined=True)
+            client_pubkey_auth = proxy.wrap(pubkey, joined=True)
+            tsreq = TSRequest()
+            tsreq["version"]    = server_version
+            tsreq["pubKeyAuth"] = client_pubkey_auth
         else:
-            pkhash = SHA256.new(b"CredSSP Client-To-Server Binding Hash\x00" + nonce + pubkey).digest()
-            tsreq["pubKeyAuth"] = proxy.wrap(pkhash, joined=True)
+            client_binding = SHA256.new(
+                b"CredSSP Client-To-Server Binding Hash\x00" + nonce + pubkey
+            ).digest()
+            client_pubkey_auth = proxy.wrap(client_binding, joined=True)
+            tsreq = TSRequest()
+            tsreq["version"]     = server_version
+            tsreq["pubKeyAuth"]  = client_pubkey_auth
+            tsreq["clientNonce"] = nonce
 
         tsrsp2 = _send_credssp(tsreq, "public key exchange")
 
@@ -391,3 +373,36 @@ class CredSSPTransport(Transport):
             try:    parts.append(self.tls_obj.read())
             except ssl.SSLWantReadError: break
         return b"".join(parts)
+
+
+# ── WebSocket Transport (MS-WSMV §2.2.9.1) ──────────────────────────────────
+class WebSocketTransport(Transport):
+    """
+    WinRM over WebSocket Transport (MS-WSMV §2.2.9.1).
+    Leverages HTTP Upgrade: websocket with subprotocol 'soap' for stealthy OPSEC tunneling.
+    """
+    def __init__(self, url: str, creds: Optional[NTCredential] = None):
+        super().__init__(url)
+        self.creds = creds
+        self.ws_url = url.replace("http://", "ws://").replace("https://", "wss://")
+        self.session.headers["Upgrade"] = "websocket"
+        self.session.headers["Connection"] = "Upgrade"
+        self.session.headers["Sec-WebSocket-Protocol"] = "soap"
+        self.session.headers["Sec-WebSocket-Version"] = "13"
+        self.session.headers["Sec-WebSocket-Key"] = b64str(secrets.token_bytes(16))
+
+    def _send(self, req: bytes | str) -> Any:
+        body = req.encode("utf-8") if isinstance(req, str) else req
+        r = Request(
+            "POST",
+            self.url,
+            data=body,
+            headers={
+                "Content-Type": "application/soap+xml;charset=UTF-8",
+                "Upgrade": "websocket",
+                "Connection": "Upgrade",
+                "Sec-WebSocket-Protocol": "soap",
+            }
+        )
+        prep = self.session.prepare_request(r)
+        return self.session.send(prep, allow_redirects=False)

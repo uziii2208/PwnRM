@@ -144,7 +144,7 @@ def ps_create_pipeline(commands: List[Any]):
         ps_simple("AddToHistory",  "B",  "false"),   # ← evasion: no PS history
         ps_simple("IsNested",      "B",  "false"),
         ps_enum("ApartmentState", 2),
-        ps_enum("RemoteStreamOptions", 15),
+        ps_enum("RemoteStreamOptions", 0),   # ← 0 = block supplementary ETW streams
         ps_struct("HostInfo", [
             ps_simple("_isHostNull",       "B",  "true"),
             ps_simple("_isHostUINull",     "B",  "true"),
