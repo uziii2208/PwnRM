@@ -1,6 +1,6 @@
 """
 core.tunnel — SOCKS5 Proxy & Port Forwarding Multiplexer
-Provides local SOCKS5 proxy (RFC 1928) and port-forwarding over PwnRM connections.
+Provides local SOCKS5 proxy (RFC 1928) and port-forwarding over PwnRM connections with thread safety and timeout controls.
 """
 
 import socket
@@ -24,27 +24,30 @@ class Socks5Server:
         self._thread: Optional[threading.Thread] = None
         self.active_tunnels: Dict[int, Tuple[str, int]] = {}
         self._conn_id = 0
+        self._lock = threading.Lock()
 
     def start(self):
-        if self.is_running:
-            return
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_sock.bind((self.bind_host, self.bind_port))
-        self.server_sock.listen(50)
-        self.is_running = True
-        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
-        self._thread.start()
-        logging.info(f"[*] SOCKS5 Server listening on {self.bind_host}:{self.bind_port}")
+        with self._lock:
+            if self.is_running:
+                return
+            self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_sock.bind((self.bind_host, self.bind_port))
+            self.server_sock.listen(50)
+            self.is_running = True
+            self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+            self._thread.start()
+            logging.info(f"[*] SOCKS5 Server listening on {self.bind_host}:{self.bind_port}")
 
     def stop(self):
-        self.is_running = False
-        if self.server_sock:
-            try:
-                self.server_sock.close()
-            except Exception:
-                pass
-            self.server_sock = None
+        with self._lock:
+            self.is_running = False
+            if self.server_sock:
+                try:
+                    self.server_sock.close()
+                except Exception:
+                    pass
+                self.server_sock = None
 
     def _accept_loop(self):
         while self.is_running and self.server_sock:
@@ -57,6 +60,7 @@ class Socks5Server:
 
     def _handle_client(self, client_sock: socket.socket, addr: tuple):
         try:
+            client_sock.settimeout(15.0)
             # 1. Handshake (RFC 1928)
             ver, nmethods = client_sock.recv(2)
             if ver != 5:
@@ -93,6 +97,7 @@ class Socks5Server:
                 remote_sock.settimeout(10.0)
                 remote_sock.connect((dst_addr, dst_port))
                 remote_sock.settimeout(None)
+                client_sock.settimeout(None)
                 # Success response
                 client_sock.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
             except Exception as e:
@@ -102,11 +107,15 @@ class Socks5Server:
                 return
 
             # 4. Bidirectional transfer
-            cid = self._conn_id
-            self._conn_id += 1
-            self.active_tunnels[cid] = (dst_addr, dst_port)
-            self._pipe_sockets(client_sock, remote_sock)
-            self.active_tunnels.pop(cid, None)
+            with self._lock:
+                cid = self._conn_id
+                self._conn_id += 1
+                self.active_tunnels[cid] = (dst_addr, dst_port)
+            try:
+                self._pipe_sockets(client_sock, remote_sock)
+            finally:
+                with self._lock:
+                    self.active_tunnels.pop(cid, None)
 
         except Exception as e:
             logging.debug("SOCKS5 client error: %s", e)
@@ -119,43 +128,45 @@ class Socks5Server:
     def _pipe_sockets(self, s1: socket.socket, s2: socket.socket):
         sockets = [s1, s2]
         while self.is_running:
-            r, _, w = select.select(sockets, [], sockets, 1.0)
-            if w:
-                break
-            for s in r:
-                other = s2 if s is s1 else s1
-                try:
+            try:
+                r, _, w = select.select(sockets, [], sockets, 1.0)
+                if w:
+                    break
+                for s in r:
+                    other = s2 if s is s1 else s1
                     data = s.recv(32768)
                     if not data:
                         return
                     other.sendall(data)
-                except Exception:
-                    return
+            except Exception:
+                break
 
 
 class PortForwarder:
-    """Manages local and remote port forwarding instances."""
+    """Manages local and remote port forwarding instances with thread safety."""
     def __init__(self):
         self.forwards: Dict[int, dict] = {}
         self._next_id = 0
+        self._lock = threading.Lock()
 
     def start_local_forward(self, local_port: int, remote_host: str, remote_port: int, bind_host: str = "127.0.0.1") -> int:
-        fid = self._next_id
-        self._next_id += 1
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((bind_host, local_port))
-        srv.listen(10)
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind((bind_host, local_port))
+            srv.listen(10)
 
-        f_info = {
-            "id": fid,
-            "type": "local",
-            "bind": f"{bind_host}:{local_port}",
-            "target": f"{remote_host}:{remote_port}",
-            "socket": srv,
-            "running": True
-        }
-        self.forwards[fid] = f_info
+            f_info = {
+                "id": fid,
+                "type": "local",
+                "bind": f"{bind_host}:{local_port}",
+                "target": f"{remote_host}:{remote_port}",
+                "socket": srv,
+                "running": True
+            }
+            self.forwards[fid] = f_info
 
         def _forward_accept():
             while f_info["running"]:
@@ -171,9 +182,13 @@ class PortForwarder:
         return fid
 
     def _pipe_forward(self, client: socket.socket, rhost: str, rport: int):
+        remote = None
         try:
             remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            remote.settimeout(10.0)
             remote.connect((rhost, rport))
+            remote.settimeout(None)
+            client.settimeout(None)
             sockets = [client, remote]
             while True:
                 r, _, _ = select.select(sockets, [], [], 1.0)
@@ -190,24 +205,27 @@ class PortForwarder:
                 client.close()
             except Exception:
                 pass
-            try:
-                remote.close()
-            except Exception:
-                pass
+            if remote:
+                try:
+                    remote.close()
+                except Exception:
+                    pass
 
     def stop_forward(self, fid: int) -> bool:
-        if fid in self.forwards:
-            f_info = self.forwards.pop(fid)
-            f_info["running"] = False
-            try:
-                f_info["socket"].close()
-            except Exception:
-                pass
-            return True
-        return False
+        with self._lock:
+            if fid in self.forwards:
+                f_info = self.forwards.pop(fid)
+                f_info["running"] = False
+                try:
+                    f_info["socket"].close()
+                except Exception:
+                    pass
+                return True
+            return False
 
     def list_forwards(self) -> list:
-        return [
-            {"id": f["id"], "type": f["type"], "bind": f["bind"], "target": f["target"]}
-            for f in self.forwards.values()
-        ]
+        with self._lock:
+            return [
+                {"id": f["id"], "type": f["type"], "bind": f["bind"], "target": f["target"]}
+                for f in self.forwards.values()
+            ]

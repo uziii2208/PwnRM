@@ -17,7 +17,7 @@ graph TD
     DirSearcher -->|PageSize=500| OUs["OU Query: (objectClass=organizationalUnit)"]
     DirSearcher -->|PageSize=500| Trusts["Trust Query: (objectClass=trustedDomain)"]
 
-    Users & Computers & Groups & OUs & Trusts --> Parser["In-Memory BloodHound CE v5 JSON Formatter"]
+    Users & Computers & Groups & OUs & Trusts --> Parser["In-Memory BloodHound CE v6 JSON Formatter"]
     Parser --> StreamOut["Streamed over PSRP to Operator Machine"]
     StreamOut --> Loot["~/.pwnrm/loot/<domain>/bloodhound/<timestamp>.json"]
 ```
@@ -38,9 +38,9 @@ The collector queries the domain partition using chunked paging (`PageSize = 500
 
 ---
 
-### 1.2 BloodHound CE Schema (v5) Serialization
+### 1.2 BloodHound CE Schema (v6) Serialization
 
-The collected objects are assembled directly in memory into BloodHound Community Edition (CE / v5) JSON format:
+The collected objects are assembled directly in memory into BloodHound Community Edition (CE / v6) JSON format:
 
 ```json
 {
@@ -69,7 +69,7 @@ The collected objects are assembled directly in memory into BloodHound Community
     "methods": 0,
     "type": "users",
     "count": 1,
-    "version": 5
+    "version": 6
   }
 }
 ```
@@ -98,22 +98,7 @@ sequenceDiagram
     Op->>Op: Catalog responsive pivot nodes into Loot
 ```
 
-### 2.1 Low-Noise Socket Probe Implementation:
-
-```powershell
-$socket = New-Object System.Net.Sockets.TcpClient
-$asyncResult = $socket.BeginConnect($ip, $port, $null, $null)
-$success = $asyncResult.AsyncWaitHandle.WaitOne(250, $false) # 250ms timeout
-if ($success -and $socket.Connected) {
-    $socket.EndConnect($asyncResult)
-    $socket.Close()
-    # Port is OPEN -> Catalog target host and port in PwnRM loot
-}
-```
-
----
-
-### 2.2 Lateral Movement Execution Vectors
+### 2.1 Lateral Movement Execution Vectors
 
 | Vector | Protocol / Port | Execution Subsystem | Stealth / OPSEC Considerations |
 |---|---|---|---|
@@ -124,7 +109,42 @@ if ($success -and $socket.Connected) {
 
 ---
 
-## 3. Declarative Playbook Automation Engine (`!playbook`)
+## 3. Coerced Authentication Engine & Protocol Vectors (`!coerce`)
+
+Coerced authentication forces a target server (such as a Domain Controller, Exchange Server, or Certificate Authority) to initiate an authenticated connection back to an operator-controlled listener (Responder, `ntlmrelayx`, or Mitm6).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Op as PwnRM Session (Target Machine)
+    participant Listener as Operator Relay / Responder (10.10.14.5)
+    participant ADCS as ADCS Web Enrollment (/certsrv/)
+
+    alt WebDAV HTTP Coercion (Bypasses SMB Signing)
+        Op->>Listener: HTTP GET \\10.10.14.5@80\share\dummy.txt (WebClient)
+        Listener-->>Op: 401 Unauthorized (NTLM Challenge)
+        Op->>Listener: NTLM Response (Machine Account TGT/Hash)
+        Listener->>ADCS: Relay NTLM to /certsrv/ (ESC8)
+        ADCS-->>Listener: Issued Machine Certificate (.pfx)
+    else MS-RPRN Print Spooler Coercion
+        Op->>Listener: RPC RpcRemoteFindFirstPrinterChangeNotificationEx (\pipe\spoolss)
+    else MS-EFSR PetitPotam Coercion
+        Op->>Listener: RPC EfsRpcOpenFileRaw (\pipe\efsrpc)
+    end
+```
+
+### 3.1 Coercion Method Matrix:
+
+| Method | Protocol / Pipe | Mechanism | Strategic Advantage |
+| :--- | :--- | :--- | :--- |
+| **`webdav`** | WebDAV HTTP (`\\ip@80\share\path`) | Initiates WebClient HTTP GET request with NetNTLM / Kerberos authentication. | **Bypasses SMB Signing entirely**, allowing seamless relaying to HTTP-based endpoints like ADCS Web Enrollment (`/certsrv/` - ESC8). |
+| **`spooler`** | MS-RPRN (`\pipe\spoolss`) | Calls `RpcRemoteFindFirstPrinterChangeNotificationEx` on the Print Spooler service. | High success rate against systems with Print Spooler enabled. |
+| **`efs`** | MS-EFSR (`\pipe\efsrpc`, `\pipe\lsarpc`) | Calls `EfsRpcOpenFileRaw` on the Encrypting File System RPC interface (PetitPotam). | Effective against Domain Controllers and servers with EFS active. |
+| **`dfs`** | MS-DFSNM (`\pipe\netdfs`) | Calls `NetrDfsEnum` on the Distributed File System namespace interface. | Alternative RPC coercion vector when spooler and EFS are restricted. |
+
+---
+
+## 4. Declarative Playbook Automation Engine (`!playbook`)
 
 Playbooks allow operators to define reproducible assessment workflows. Each playbook defines a sequence of module invocations, arguments, and failure handling conditions:
 
@@ -145,7 +165,7 @@ graph TD
     Step6 --> LootArchive["Structured Loot Index (~/.pwnrm/loot/)"]
 ```
 
-### 3.1 Built-in Playbook Configurations:
+### 4.1 Built-in Playbook Configurations:
 
 #### 1. `default_triage`
 Executes rapid host-level reconnaissance and credential artifact collection:
@@ -179,6 +199,10 @@ steps:
     args: ["--wsus"]
   - module: kerberos
     args: ["--roast", "--asrep"]
+  - module: laps
+    args: ["-a"]
+  - module: acl
+    args: ["--tier0"]
   - module: bloodhound
     args: []
 ```
@@ -201,9 +225,9 @@ steps:
 
 ---
 
-## 4. Hardened File Staging & In-Memory XOR Delivery
+## 5. Hardened File Staging & In-Memory XOR Delivery
 
-### 4.1 In-Memory XOR Encryption Protocol (`!upload -xor`, `!psrun -xor`, `!netrun -xor`)
+### 5.1 In-Memory XOR Encryption Protocol (`!upload -xor`, `!psrun -xor`, `!netrun -xor`)
 
 To bypass perimeter and network-level signature scanners (Suricata, Zeek, deep packet inspection), payloads are encrypted with a dynamic stream cipher:
 
@@ -224,7 +248,7 @@ sequenceDiagram
 
 ---
 
-### 4.2 Stream-Bounded Download & Integrity Validation (`!download`)
+### 5.2 Stream-Bounded Download & Integrity Validation (`!download`)
 
 1. **Remote In-Memory Compression**: Directories are compressed into an in-memory `.zip` archive on the remote host using `System.IO.Compression.ZipFile`.
 2. **Chunked Streaming**: Output is streamed back in 64 KB chunks over PSRP stream buffers.

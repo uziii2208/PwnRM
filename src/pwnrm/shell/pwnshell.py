@@ -84,7 +84,7 @@ HISTORY_EXCLUDE_PATTERN = re.compile(
 
 # ── Command Registry (OPT-03) ────────────────────────────────────────────────
 COMMAND_REGISTRY = {
-    "Core Platform Commands (v2.0)": {
+    "Core Platform Commands (v2.1)": {
         "!session [list|switch|save|exec-all]": "Multi-session manager & jump graph",
         "!socks [PORT|stop|status]": "In-band SOCKS5 proxy (default: 1080)",
         "!portfwd [LPORT RHOST:RPORT|list|stop]": "Local & remote port forwarding multiplexer",
@@ -98,10 +98,15 @@ COMMAND_REGISTRY = {
         "!kerberos [--roast|--asrep|--dmsa|--diamond]": "AES Kerberoast, AS-REP & dMSA suite",
         "!entra [-s]": "Hybrid Entra ID / Azure AD PRT pivot",
         "!creds [--vault|--dpapi|--history]": "Deep credential & token artifact hunter",
+        "!laps [-a|--encrypted]": "Windows LAPS hunter (Legacy & Server 2025)",
+        "!acl [--target <T>|--tier0]": "Active Directory DACL & privilege escalation scout",
+        "!token [--list|--privs|--elevate]": "Process token hunter & in-memory impersonation",
         "!bloodhound [-c <methods>]": "In-memory AD graph collector (BloodHound)",
         "!lateral [--subnet <s>]": "Subnet scout & lateral movement engine",
     },
-    "Recon, Staging & Evasion": {
+    "Coercion, In-Memory Hives & Staging": {
+        "!vss [--drive C:|--sam|--ntds|--clean]": "In-memory VSS shadow copy hive extractor (SAM/NTDS)",
+        "!coerce --listener <IP> [--method M]": "Coerced auth engine (WebDAV, MS-RPRN, MS-EFSR)",
         "!evasion [--edr|--amsi|--etw]": "Polymorphic AMSI/ETW bypass & EDR scout",
         "!adtriage [-q]": "AD post-auth quick triage",
         "!shares [-q] [HOST..]": "SMB share permission mapper",
@@ -228,6 +233,11 @@ class PwnShell:
                 ("!kerberos",   lambda args: self.module_mgr.get_module("kerberos").run(self, split_args(args))),
                 ("!entra",      lambda args: self.module_mgr.get_module("entra").run(self, split_args(args))),
                 ("!creds",      lambda args: self.module_mgr.get_module("creds").run(self, split_args(args))),
+                ("!laps",       lambda args: self.module_mgr.get_module("laps").run(self, split_args(args))),
+                ("!acl",        lambda args: self.module_mgr.get_module("acl").run(self, split_args(args))),
+                ("!token",      lambda args: self.module_mgr.get_module("token").run(self, split_args(args))),
+                ("!vss",        lambda args: self.module_mgr.get_module("vss").run(self, split_args(args))),
+                ("!coerce",     lambda args: self.module_mgr.get_module("coerce").run(self, split_args(args))),
                 ("!bloodhound", lambda args: self.module_mgr.get_module("bloodhound").run(self, split_args(args))),
                 ("!lateral",    lambda args: self.module_mgr.get_module("lateral").run(self, split_args(args))),
                 ("!evasion",    lambda args: self.module_mgr.get_module("evasion").run(self, split_args(args))),

@@ -18,7 +18,7 @@ from .utils       import load_kerberos_ccache, load_pfx
 def argument_parser() -> ArgumentParser:
     parser = ArgumentParser(
         prog="pwnrm",
-        description="PwnRM v2.0.1 — Advanced WinRM / AD Post-Exploitation Platform (2026+ TTPs)",
+        description="PwnRM v2.1.0 — Advanced WinRM / AD Post-Exploitation Platform (2026+ TTPs)",
         formatter_class=RawDescriptionHelpFormatter,
         epilog=(
             "Shell commands (once connected):\n"
@@ -30,6 +30,11 @@ def argument_parser() -> ArgumentParser:
             "  !kerberos  [--roast|--asrep|--dmsa]      AES Kerberoast, AS-REP & dMSA suite\n"
             "  !entra     [-s]                          Hybrid Entra ID / Azure AD PRT pivot\n"
             "  !creds     [--vault|--dpapi|--history]   Deep credential & token artifact hunter\n"
+            "  !laps      [-a|--encrypted]              Windows LAPS hunter (Legacy & Server 2025)\n"
+            "  !acl       [--target <T>|--tier0]        Active Directory DACL & privilege escalation scout\n"
+            "  !token     [--list|--privs|--elevate]    Process token hunter & in-memory impersonation\n"
+            "  !vss       [--drive C:|--sam|--ntds]     In-memory VSS shadow copy hive extractor\n"
+            "  !coerce    --listener <IP> [--method M]  Coerced auth engine (WebDAV, MS-RPRN, MS-EFSR)\n"
             "  !bloodhound [-c <methods>]               In-memory AD graph collector (BloodHound)\n"
             "  !lateral   [--subnet <s>]                Subnet scout & lateral movement engine\n"
             "  !evasion   [--edr|--amsi|--etw]          Polymorphic AMSI/ETW bypass & EDR scout\n"

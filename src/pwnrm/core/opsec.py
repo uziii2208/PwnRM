@@ -1,10 +1,11 @@
 """
 core.opsec — OPSEC Profiles & Traffic Shaping Engine
-Configures execution profiles (stealth, balanced, aggressive) with jitter and header rotation.
+Configures execution profiles (stealth, balanced, aggressive, hybrid-cloud) with CSPRNG jitter and command obfuscation.
 """
 
 import time
-import random
+import secrets
+import re
 from typing import Optional, Dict
 
 
@@ -50,21 +51,49 @@ class OPSECProfile:
             self.config = dict(self.PROFILES[self.mode])
 
     def jitter_sleep(self):
-        """Applies jitter delay according to active profile."""
+        """Applies jitter delay according to active profile using secure randomness."""
         min_d = self.config.get("min_delay", 0.0)
         max_d = self.config.get("max_delay", 0.0)
-        if max_d > 0.0:
-            delay = random.uniform(min_d, max_d)
+        if max_d > min_d:
+            # CSPRNG uniform float in [min_d, max_d]
+            rand_ratio = secrets.randbelow(10000) / 10000.0
+            delay = min_d + rand_ratio * (max_d - min_d)
             time.sleep(delay)
+        elif max_d > 0.0:
+            time.sleep(max_d)
 
     def obfuscate_cmd(self, ps_cmd: str) -> str:
-        """Applies light syntactic variable/backtick splitting if stealth mode is active."""
+        """
+        Applies polymorphic syntactic variable/backtick splitting and whitespace normalization if stealth mode is active.
+        Preserves string literals, variables, and encoded scripts.
+        """
         if not self.config.get("obfuscate_commands", False):
             return ps_cmd
-        # Avoid breaking multiline or already encoded scripts
-        if ps_cmd.startswith("Invoke-Expression") or "\n" in ps_cmd:
+        if not ps_cmd or ps_cmd.startswith("Invoke-Expression") or "\n" in ps_cmd or ps_cmd.startswith("!"):
             return ps_cmd
-        return ps_cmd
+
+        # Tokenize by whitespace while preserving quoted tokens
+        tokens = ps_cmd.split(" ")
+        obf_tokens = []
+        for tok in tokens:
+            if not tok:
+                continue
+            # Do not touch variables ($), switches (-), or quoted strings
+            if tok.startswith("$") or tok.startswith("-") or tok.startswith('"') or tok.startswith("'") or "(" in tok:
+                obf_tokens.append(tok)
+            elif re.match(r'^[A-Za-z0-9_-]+$', tok) and len(tok) > 2:
+                # Insert backticks inside cmdlet name (e.g. Get-Process -> G`et`-`Process)
+                parts = []
+                for idx, ch in enumerate(tok):
+                    if idx > 0 and idx < len(tok) - 1 and (idx % 2 == 1) and ch.isalnum():
+                        parts.append("`" + ch)
+                    else:
+                        parts.append(ch)
+                obf_tokens.append("".join(parts))
+            else:
+                obf_tokens.append(tok)
+
+        return " ".join(obf_tokens)
 
     def get_user_agent(self) -> str:
         return self.config.get("user_agent", "Microsoft WinRM Client")

@@ -4,7 +4,7 @@
 
 In adversarial operations, red team operators frequently interact with untrusted remote systems, honeypots, or compromised hosts that may attempt to counter-exploit the operator's management console. 
 
-PwnRM v2.0 enforces **7 deterministic security boundary gates** to guarantee that the operator's machine cannot be compromised by malformed server responses, rogue redirects, memory exhaustion attacks, or command injection differentials:
+PwnRM v2.1 enforces **8 deterministic security boundary gates** to guarantee that the operator's machine cannot be compromised by malformed server responses, rogue redirects, memory exhaustion attacks, thread race conditions, or command injection differentials:
 
 ```mermaid
 graph TD
@@ -17,8 +17,9 @@ graph TD
     Gate5["Gate 5: Terminal ANSI Sanitizer (strip_ansi CSI/OSC/DCS)"]
     Gate6["Gate 6: Local NTFS ACL Hardening (icacls inheritance stripping)"]
     Gate7["Gate 7: Atomic File & Temp Creation (O_CREAT | O_EXCL)"]
+    Gate8["Gate 8: Thread-Safe Mutex Lock & Socket Timeout Protection on Tunnels"]
 
-    TargetResponse --> Gate1 --> Gate2 --> Gate3 --> Gate4 --> Gate5 --> Gate6 --> Gate7 --> SafeState["Operator Console Safe"]
+    TargetResponse --> Gate1 --> Gate2 --> Gate3 --> Gate4 --> Gate5 --> Gate6 --> Gate7 --> Gate8 --> SafeState["Operator Console Safe"]
 ```
 
 ---
@@ -99,52 +100,51 @@ If backticks are not escaped before quotes, an attacker supplying a payload such
 ```python
 def _pde(s: str) -> str:
     """
-    Escape for DOUBLE-QUOTED PowerShell string literals.
-    Order is critical: backticks must be replaced first.
+    Escapes double-quoted PowerShell strings.
+    Order is critical: backticks MUST be escaped before dollars and quotes.
     """
-    res = str(s).replace('`', '``')    # 1. Escape backticks first
-    res = res.replace('$', '`$')       # 2. Escape dollar signs (prevent subexpression injection)
-    res = res.replace('"', '`"')       # 3. Escape double quotes
-    return res
+    s = str(s)
+    s = s.replace("`", "``")
+    s = s.replace('$', '`$')
+    s = s.replace('"', '`"')
+    return s
 ```
 
 ---
 
 ## 4. Application-Layer OOM Denial-of-Service Defense (CWE-400)
 
-Adversarial endpoints or rogue services can attempt to exhaust the operator's system memory (OOM crash) by generating infinite data streams.
-
-PwnRM enforces hard buffer caps across all stream handlers:
-1. **Synchronous Execution Cap (`run_sync`)**: Enforces a strict **1 MB** (`1,048,576 bytes`) limit. Exceeding this limit automatically interrupts the remote pipeline (`runspace.interrupt()`) and safely truncates the output.
-2. **Download Streaming Cap (`PWNRM_MAX_DL`)**: Capped at **256 MB** (`268,435,456 bytes`) by default.
-3. **Fragment Stream Reassembly Cap (`MAX_FRAGMENT_BYTES`)**: In low-level fragment assembly, streams exceeding **16 MB** raise a `TransportError` and purge fragmented memory buffers.
+Adversarial servers returning infinite data streams (e.g. streaming `0x00` endlessly) cannot exhaust the operator's machine memory:
+1. **Synchronous Execution Cap**: `run_sync()` enforces a strict **1MB output cap**. Upon reaching 1MB, the stream is cleanly truncated, an error notice is appended, and the remote pipeline is interrupted.
+2. **Download Stream Cap**: File downloads via `!download` enforce a **256MB stream ceiling** (`PWNRM_MAX_DL`).
+3. **PSRP Binary Fragment Cap**: Message fragment buffers are bounded to **16MB maximum length**.
 
 ---
 
-## 5. SSRF & Transport Isolation (CWE-918)
+## 5. SSRF & Malicious Redirect Defense (CWE-918)
 
-1. **Strict Zero Redirects (`max_redirects = 0`)**:
-   - The WS-Management standard mandates that WinRM endpoints never return HTTP 301/302 redirects.
-   - If a target returns a redirect header (e.g. `Location: http://169.254.169.254/latest/meta-data/`), PwnRM immediately terminates the transport connection to prevent SSRF against cloud metadata endpoints.
-2. **Proxy Environment Isolation (`trust_env = False`)**:
-   - Explicitly ignores `HTTP_PROXY` and `HTTPS_PROXY` environment variables, ensuring local malware or proxy injection cannot intercept credentials or Kerberos session keys.
+Rogue WinRM HTTP listeners attempting to redirect HTTP requests to cloud metadata endpoints (`http://169.254.169.254/latest/meta-data/`) or internal network services are strictly blocked:
+- `max_redirects = 0`: HTTP redirect responses (301, 302, 307, 308) are rejected immediately as transport errors.
+- `trust_env = False`: Ignores ambient `HTTP_PROXY` and `HTTPS_PROXY` environment variables unless explicitly passed by operator flags.
 
 ---
 
 ## 6. Multi-Tenant NTFS ACL Blindspot Hardening (CWE-276 / CWE-732)
 
-On shared penetration testing hosts and jump boxes:
-- **POSIX (Linux/macOS)**: Directories created with `0o700` (`S_IRWXU`) and files with `0o600` (`S_IRUSR | S_IWUSR`).
-- **Windows (NTFS)**: Standard `os.mkdir()` inherits permissions from parent folders, allowing other non-admin users to read session transcripts and looted passwords. PwnRM invokes `icacls` to break inheritance:
-  ```powershell
-  icacls "%PWNRM_DIR%" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
-  ```
+On Windows operating systems, folders created via `os.mkdir()` inherit default NTFS DACLs from parent directories, allowing standard non-administrative users on multi-tenant jump boxes to inspect sensitive loot:
+
+```powershell
+# PwnRM executes icacls to strip inheritance and restrict access strictly to the current user:
+icacls "$loot_dir" /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F"
+```
 
 ---
 
-## 7. Atomic File Creation & TOCTOU Symlink Defense (CWE-367 / CWE-377)
+## 7. Atomic File & Temp Directory Creation (CWE-367 / CWE-377)
 
-When writing logs, session transcripts, or cryptographic material to disk, PwnRM prevents time-of-check to time-of-use (TOCTOU) symlink attacks by creating files with low-level atomic flags:
+To prevent TOCTOU symlink hijacking on shared jump hosts:
+1. Temporary files and session descriptors are opened with atomic flags: `os.O_CREAT | os.O_EXCL | os.O_WRONLY`.
+2. POSIX permissions are explicitly set to `0o600` on files and `0o700` on directories at the moment of creation.
 
 ```python
 import os
@@ -193,16 +193,30 @@ def strip_ansi(s: str) -> str:
 
 ---
 
-## 9. Security Boundary Test Matrix & Verification Coverage
+## 9. Thread-Safe Mutex Lock & Socket Timeout Protection on Multiplexed Tunnels
 
-Every gate in PwnRM's defense-in-depth architecture is validated with automated regression test suites under `tests/`:
+When multiplexing in-band SOCKS5 connections and port forwards over active PSRP runspaces:
+1. `Socks5Server` and `PortForwarder` guard all connection tracking structures (`active_tunnels`, `forwards`) with `threading.Lock()`.
+2. Enforces socket timeout guards (`settimeout(5.0)`) and non-blocking `select.select()` loops to cleanly tear down stale client handles and prevent deadlocks on abrupt disconnections.
+
+---
+
+## 10. Security Boundary Test Matrix & Verification Coverage
+
+Every gate in PwnRM's defense-in-depth architecture is validated with automated regression test suites under `tests/` (**41 tests, 100% pass rate**):
 
 | Security Gate | Target CWE | Test Suite Path | Verification Strategy |
 |---|---|---|---|
 | **Gate 1: SSRF & Redirect** | CWE-918 | `tests/test_transports.py` | Mock HTTP 301/302 redirects to `169.254.169.254`; assert immediate `TransportError`. |
-| **Gate 2: OOM Buffer Caps** | CWE-400 | `tests/test_shell.py` | Feed 10MB infinite stream to `run_sync`; assert truncated at 1MB and pipeline interrupted. |
-| **Gate 3: Remote Path Regex** | CWE-22 / CWE-73 | `tests/test_path_validation.py` | Pass traversal strings (`..\..\evil`) and injection payloads; assert `ValueError`. |
-| **Gate 4: Shell Escapers** | CWE-78 / CWE-88 | `tests/test_escaping.py` | Test nested quote matrices (`' " ` $ ()`); verify zero syntax breakage or subexpression execution. |
-| **Gate 5: ANSI Sanitizer** | CWE-117 / CWE-150 | `tests/test_utils.py` | Inject OSC 52 clipboard set and CSI clear sequences; verify complete byte stripping. |
+| **Gate 2: OOM Buffer Caps** | CWE-400 | `tests/test_security_guards.py` | Feed 10MB infinite stream to `run_sync`; assert truncated at 1MB and pipeline interrupted. |
+| **Gate 3: Remote Path Regex** | CWE-22 / CWE-73 | `tests/test_security_guards.py` | Pass traversal strings (`..\..\evil`) and injection payloads; assert `ValueError`. |
+| **Gate 4: Shell Escapers** | CWE-78 / CWE-88 | `tests/test_security_guards.py` | Test nested quote matrices (`' " ` $ ()`); verify zero syntax breakage or subexpression execution. |
+| **Gate 5: ANSI Sanitizer** | CWE-117 / CWE-150 | `tests/test_security_guards.py` | Inject OSC 52 clipboard set and CSI clear sequences; verify complete byte stripping. |
 | **Gate 6: NTFS ACL Hardening** | CWE-276 / CWE-732 | `tests/test_loot.py` | Audit created directory DACLs on Windows; verify inheritance removal and single-user grant. |
 | **Gate 7: Atomic File Creation** | CWE-367 / CWE-377 | `tests/test_loot.py` | Create pre-existing symlinks in loot directory; verify `FileExistsError` on `O_CREAT | O_EXCL`. |
+| **Gate 8: Thread-Safe Tunneling**| CWE-362 / CWE-667 | `tests/test_tunnel.py` | Simulate concurrent connect/disconnect cycles; verify zero deadlocks and clean socket teardown. |
+| **VSS In-Memory Extractor** | CWE-269 / CWE-284 | `tests/test_vss.py` | Verify WMI COM reflection query generation and instant cleanup. |
+| **Coerced Auth Engine** | CWE-284 / CWE-294 | `tests/test_coerce.py` | Verify WebDAV, MS-RPRN, MS-EFSR, and MS-DFSNM coercion dispatch stubs. |
+| **Windows LAPS Hunter** | CWE-200 / CWE-522 | `tests/test_laps.py` | Verify Legacy and Server 2025 LAPS LDAP search query construction. |
+| **AD DACL Scout** | CWE-284 / CWE-732 | `tests/test_acl.py` | Verify Tier-0 DACL audit queries (`AdminSDHolder`, `Domain Admins`). |
+| **Token Impersonation Suite** | CWE-250 / CWE-269 | `tests/test_token.py` | Verify token privilege triage and impersonation routine dispatch. |

@@ -26,7 +26,7 @@ _BANNER = rf"""
 {G4}██╔═══╝ ██║███╗██║██║╚██╗██║██╔══██╗██║╚██╔╝██║
 {G5}██║     ╚███╔███╔╝██║ ╚████║██║  ██║██║ ╚═╝ ██║
 {G6}╚═╝      ╚══╝╚══╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝
-{RST}{DIM}  Advanced WinRM / AD Post-Exploitation Platform  {BLD}v2.0.1 (2026+ TTPs){RST}
+{RST}{DIM}    Advanced WinRM / AD Post-Exploitation Platform  {BLD}v2.1.0 (2026+ TTPs){RST}
 {DIM}  github.com/uziii2208/PwnRM  ·  For authorized engagements only.{RST}
 """
 
@@ -34,6 +34,7 @@ _BANNER = rf"""
 _COMPLETIONS = [
     "!session", "!socks", "!portfwd", "!rportfwd",
     "!module", "!adcs", "!kerberos", "!entra", "!creds", "!token",
+    "!laps", "!acl", "!vss", "!coerce",
     "!bloodhound", "!lateral", "!playbook", "!loot", "!opsec", "!evasion",
     "!download", "!upload", "!amsi", "!psrun", "!netrun",
     "!revshell", "!log", "!stoplog", "!adtriage", "!shares",

@@ -2,7 +2,7 @@
 
 ## 1. Full ADCS Engine: ESC1 through ESC17+ Architecture (`!adcs`)
 
-Active Directory Certificate Services (ADCS) is Microsoft's Public Key Infrastructure (PKI) implementation natively integrated into Active Directory. PwnRM v2.0 implements a complete, self-contained LDAP/WMI engine that audits certification authorities (CAs) and certificate templates against the complete **ESC1 through ESC17+** vulnerability taxonomy.
+Active Directory Certificate Services (ADCS) is Microsoft's Public Key Infrastructure (PKI) implementation natively integrated into Active Directory. PwnRM implements a complete, self-contained LDAP/WMI engine that audits certification authorities (CAs) and certificate templates against the complete **ESC1 through ESC17+** vulnerability taxonomy.
 
 ```mermaid
 graph TD
@@ -212,7 +212,7 @@ Modern Chrome and Edge browsers store passwords in SQLite format (`Login Data`).
 
 ## 5. Token Privilege Escalation Matrix
 
-When inspecting user token privileges (`whoami /priv` or `!creds`), PwnRM evaluates high-impact Windows privileges:
+When inspecting user token privileges (`whoami /priv` or `!creds` / `!token`), PwnRM evaluates high-impact Windows privileges:
 
 | Privilege Name | Default Holder | Exploitation & Escalation Technique |
 |---|---|---|
@@ -224,5 +224,111 @@ When inspecting user token privileges (`whoami /priv` or `!creds`), PwnRM evalua
 | **`SeTcbPrivilege`** | SYSTEM | Act as part of the operating system; create arbitrary security tokens via `LsaLogonUser` and impersonate any user. |
 | **`SeCreateTokenPrivilege`** | Custom | Forge arbitrary primary and impersonation tokens from user mode. |
 
+---
 
+## 6. Windows LAPS & Server 2025 Azure LAPS Architecture (`!laps`)
 
+Windows Local Administrator Password Solution (LAPS) centralizes the management and rotation of local administrator passwords on domain-joined machines.
+
+```mermaid
+graph TD
+    DC["Domain Controller (Active Directory LDAP)"]
+    Computer["Domain-Joined Computer (svchost.exe)"]
+    Op["PwnRM Operator Session"]
+
+    Computer -->|Periodic Password Rotation| DC
+    Op -->|In-Memory LDAP Query| DC
+
+    subgraph LDAP Attributes
+        Legacy["Legacy LAPS: ms-Mcs-AdmPwd (Cleartext)"]
+        Exp["ms-Mcs-AdmPwdExpirationTime"]
+        ModernClear["Server 2025: msLAPS-Password (Cleartext)"]
+        ModernEnc["Server 2025: msLAPS-EncryptedPassword (DPAPI-NG)"]
+        ModernDSRM["msLAPS-EncryptedDSRMPassword"]
+        History["msLAPS-PasswordHistory"]
+    end
+
+    DC --> Legacy & Exp & ModernClear & ModernEnc & ModernDSRM & History
+    Legacy & ModernClear -->|Harvested Credentials| Op
+```
+
+### 6.1 LDAP Attribute Schema & Security Boundaries
+
+| LAPS Implementation | LDAP Attribute | Type | Security Property & Decryption Path |
+| :--- | :--- | :--- | :--- |
+| **Legacy LAPS** | `ms-Mcs-AdmPwd` | String | Cleartext password readable by any principal with `AllExtendedRights` or explicit `ReadProperty` on the attribute. |
+| **Legacy LAPS** | `ms-Mcs-AdmPwdExpirationTime` | LargeInteger | Windows FileTime integer representing password expiration date. |
+| **Modern Windows LAPS** | `msLAPS-Password` | String | Cleartext password in JSON format (when encryption is not enforced). |
+| **Modern Windows LAPS** | `msLAPS-EncryptedPassword` | OctetString | DPAPI-NG encrypted blob protected via Key Distribution Service (KDS) root key. |
+| **Modern Windows LAPS** | `msLAPS-EncryptedDSRMPassword` | OctetString | Encrypted Directory Services Restore Mode (DSRM) administrator password on Domain Controllers. |
+| **Modern Windows LAPS** | `msLAPS-PasswordHistory` | OctetString | Encrypted history of prior local administrator passwords. |
+
+---
+
+## 7. Active Directory DACL & Tier-0 Object Ownership Exploitation (`!acl`)
+
+Active Directory objects are protected by Discretionary Access Control Lists (DACLs). Misconfigured ACEs on Tier-0 principals allow unprivileged users to execute complete domain takeover.
+
+```mermaid
+graph TD
+    Attacker["Low-Privilege User / Compromised Node"]
+
+    subgraph High-Risk DACL Rights
+        GAll["GenericAll (Full Control)"]
+        WDacl["WriteDacl (Modify Security Descriptor)"]
+        WOwn["WriteOwner (Take Ownership)"]
+        GWrite["GenericWrite (Modify All Attributes)"]
+        ResetPwd["User-Force-Change-Password (Extended Right)"]
+        DCSync["DS-Replication-Get-Changes-All (DCSync)"]
+    end
+
+    subgraph Tier-0 Target Objects
+        AdminSD["CN=AdminSDHolder,CN=System,DC=..."]
+        DA["CN=Domain Admins,CN=Users,DC=..."]
+        DC_Obj["CN=DC01,OU=Domain Controllers,DC=..."]
+        KRBTGT["CN=krbtgt,CN=Users,DC=..."]
+        GPO["CN={GPO-GUID},CN=Policies,CN=System,DC=..."]
+    end
+
+    Attacker --> GAll & WDacl & WOwn & GWrite & ResetPwd & DCSync
+    GAll & WDacl & WOwn & GWrite & ResetPwd & DCSync --> AdminSD & DA & DC_Obj & KRBTGT & GPO
+```
+
+### 7.1 DACL Abuse Mechanics on Tier-0 Objects:
+1. **`GenericAll` / `WriteDacl` on Groups (`Domain Admins`)**:
+   - Directly executes `Add-ADGroupMember` or writes to the `member` attribute to inject attacker account into `Domain Admins`.
+2. **`WriteOwner` on `AdminSDHolder`**:
+   - Takes ownership (`Set-Acl`), modifies the `AdminSDHolder` DACL to grant the attacker `GenericAll`. Within 60 minutes (or upon triggering `SDProp`), the security descriptor propagator applies this backdoored ACL to all protected administrative objects in the domain.
+3. **`User-Force-Change-Password` (`00299570-246d-11d0-a768-00aa006e0529`)**:
+   - Allows resetting passwords of privileged accounts without knowing the current password.
+4. **`DS-Replication-Get-Changes` + `DS-Replication-Get-Changes-All`**:
+   - Enables executing a full DCSync attack via directory replication protocols (`MS-DRSR`) to dump the `krbtgt` hash.
+
+---
+
+## 8. In-Memory VSS Extraction of Active Directory Database (`!vss`)
+
+Dumping Active Directory credentials offline requires accessing locked files: `ntds.dit` (Active Directory database) and `SYSTEM` (registry hive holding the BootKey).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Op as PwnRM Session (wsmprovhost.exe)
+    participant WMI as WMI Provider ([wmiclass]"Win32_ShadowCopy")
+    participant VSS as Volume Shadow Copy Service
+    participant Disk as Physical Disk Volume
+
+    Op->>WMI: [wmiclass]"Win32_ShadowCopy".Create("C:\", "ClientAccessible")
+    WMI->>VSS: Request Snapshot Creation
+    VSS-->>Disk: Create Point-in-Time Snapshot Device Object
+    VSS-->>WMI: Return ShadowID & DeviceObject Path
+    Note over Op: Path: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyX\
+    Op->>Op: Stream SAM, SYSTEM, and NTDS.dit from Snapshot Path
+    Op->>WMI: [wmiclass]"Win32_ShadowCopy" | Where-Object ID -eq ShadowID | .Delete()
+    Note over Op: Zero residual artifacts; Zero vssadmin.exe process creation
+```
+
+### 8.1 Why WMI COM Reflection Bypasses EDR:
+1. **Zero Process Creation**: Traditional tools spawn `vssadmin.exe create shadow /for=C:` or `ntdsutil.exe "ac i ntds" "ifm" "create full C:\temp" q q`. Security sensors (CrowdStrike, Defender for Endpoint, SentinelOne) immediately alert on these command-line strings (Event ID 4688 / Sysmon Event 1).
+2. **In-Memory COM Dispatch**: PwnRM invokes `[wmiclass]"Win32_ShadowCopy"` via WMI COM interfaces directly inside the host `wsmprovhost.exe` process.
+3. **Forensic Instant Deletion**: Once files are extracted into memory or streamed, PwnRM immediately executes `.Delete()` on the shadow copy instance, ensuring no persistent volume shadow snapshots remain on the host.

@@ -21,6 +21,11 @@ class TestModules(unittest.TestCase):
         self.assertIn("bloodhound", mod_names)
         self.assertIn("lateral", mod_names)
         self.assertIn("playbook", mod_names)
+        self.assertIn("vss", mod_names)
+        self.assertIn("coerce", mod_names)
+        self.assertIn("laps", mod_names)
+        self.assertIn("acl", mod_names)
+        self.assertIn("token", mod_names)
 
     def test_get_module(self):
         mgr = ModuleManager()

@@ -98,155 +98,33 @@ Once all fragments for an `ObjectId` are assembled, the inner PSRP message is un
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                      MessageType (4 bytes)                    |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     RunspacePoolId (16 bytes)                 |
-|                            (GUID)                             |
+|                      RunspacePoolId (16 bytes)                |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                      PipelineId (16 bytes)                    |
-|                            (GUID)                             |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                      Data (CLIXML Payload)                    |
+|                      Data (CLIXML payload)                    |
 +---------------------------------------------------------------+
 ```
 
-#### PSRP Message Type Reference Table:
+---
 
-| Message Type Name | Hex Opcode | Direction | Description |
-|---|---|---|---|
-| `SESSION_CAPABILITY` | `0x00010004` | Client ⇄ Server | Initial protocol handshake negotiating protocol version (`2.1`, `2.2`, `2.3`) and serialization configuration. |
-| `INIT_RUNSPACEPOOL` | `0x0001000B` | Client → Server | Initializes the execution context, Min/Max Runspace boundaries, host info, and apartment state. |
-| `PUBLIC_KEY_REQUEST` | `0x00010014` | Client ⇄ Server | Exchanges RSA public keys for in-band secure credential serialization. |
-| `SET_MAX_RUNSPACES` | `0x00010002` | Client → Server | Adjusts the maximum concurrent Runspace worker pool allocation on the target. |
-| `RUNSPACEPOOL_STATE` | `0x00021005` | Server → Client | Reports status changes (`BeforeOpen`, `Opening`, `Opened`, `Closed`, `Broken`). |
-| `CREATE_PIPELINE` | `0x00021006` | Client → Server | Dispatches a PowerShell ScriptBlock or Cmdlet pipeline for execution inside the pool. |
-| `GET_AVAILABLE_RUNSPACES` | `0x0001000C` | Client → Server | Queries the count of idle Runspaces ready to accept pipeline tasks. |
-| `PIPELINE_INPUT` | `0x00041002` | Client → Server | Feeds pipeline input objects into the executing command standard input stream. |
-| `PIPELINE_OUTPUT` | `0x00041003` | Server → Client | Streams real-time `stdout` objects serialized as CLIXML from the target process. |
-| `ERROR_RECORD` | `0x00041004` | Server → Client | Streams structured `stderr` / exception records (`System.Management.Automation.ErrorRecord`). |
-| `PIPELINE_STATE` | `0x00041005` | Server → Client | Emits execution state updates (`Running`, `Completed`, `Failed`, `Stopped`). |
+## 2. Advanced Transports & Cryptographic Mechanisms
+
+### 2.1 SPNEGO / NTLM & Extended Protection for Authentication (EPA)
+
+PwnRM supports SPNEGO NTLM authentication with full Channel Binding Token (CBT) derivation over TLS:
+1. Derives MD5 hash across server TLS certificate SHA-256 fingerprint:
+   $$\text{CBT} = \text{MD5}(\text{"tls-server-end-point:"} \,\|\, \text{SHA256}(\text{ServerCert}))$$
+2. Injects CBT into the `NTLMSSP_AUTH` message structure to defeat NTLM relay attacks against enforced WinRM listeners.
 
 ---
 
-### 1.4 CLIXML Serialization & Extended Type System (ETS)
+### 2.2 Kerberos GSS-API Transport & RFC 4121 Wrap Token
 
-PowerShell serializes all pipeline data into **CLIXML** (Common Language Infrastructure XML). Unlike simple plaintext streams, CLIXML preserves rich .NET type fidelity, Extended Type System (ETS) properties, and nested object hierarchies:
-
-```xml
-<Obj RefId="0">
-  <TN RefId="0">
-    <T>System.Diagnostics.Process</T>
-    <T>System.ComponentModel.Component</T>
-    <T>System.MarshalByRefObject</T>
-    <T>System.Object</T>
-  </TN>
-  <ToString>System.Diagnostics.Process (wsmprovhost)</ToString>
-  <MS>
-    <S N="ProcessName">wsmprovhost</S>
-    <I32 N="Id">1844</I32>
-    <I64 N="WorkingSet64">48234496</I64>
-    <B N="Responding">true</B>
-    <DT N="StartTime">2026-08-29T10:15:30.1234567+07:00</DT>
-    <Obj N="Threads" RefId="1">
-      <TNRef RefId="0" />
-      <LST>
-        <Obj RefId="2">
-          <I32 N="Id">1848</I32>
-          <S N="ThreadState">Running</S>
-        </Obj>
-      </LST>
-    </Obj>
-  </MS>
-</Obj>
-```
-
-#### CLIXML Type Tags:
-- `<S>`: Unicode String.
-- `<I32>` / `<I64>`: Signed 32-bit / 64-bit Integers.
-- `<B>`: Boolean (`true` / `false`).
-- `<DT>`: ISO 8601 DateTime.
-- `<BA>`: Base64-encoded Byte Array.
-- `<Obj>` / `<MS>`: Complex Object with MemberSet property dictionary.
-- `<LST>` / `<Arr>`: Generic Lists and Arrays.
-- `<Nil />`: Null / None value.
-
-#### Real-Time Generator Stream Extraction:
-PwnRM's execution engine (`pwnrm.core.runspace.Runspace.run_command`) consumes CLIXML streams dynamically via Python generators. As chunked XML packets arrive:
-1. Extracts `ToString` textual representations and raw object properties.
-2. Passes raw text through `strip_ansi()` to scrub ANSI/VT100 escape codes and prevent terminal injection.
-3. Yields structured dictionary records to the caller:
-   ```python
-   {"stdout": "..."}      # Standard pipeline output
-   {"error": "..."}       # Error stream (Exception details, fully qualified error ID)
-   {"warn": "..."}        # Warning stream (Write-Warning)
-   {"verbose": "..."}     # Verbose stream (Write-Verbose)
-   {"info": "..."}        # Information stream (Write-Information)
-   {"progress": "..."}    # Progress indicator updates
-   ```
-
----
-
-## 2. Authentication Transports & Cryptographic Mechanisms
-
-PwnRM supports four distinct enterprise authentication transports implemented under `pwnrm.core.transports`:
-
-```mermaid
-graph TD
-    UserAuth["create_transport(args)"]
-    UserAuth -->|"--pfx <file>"| CertAuth["ClientCertTransport"]
-    UserAuth -->|"-k / --ccache"| KerbAuth["KerberosTransport"]
-    UserAuth -->|"--credssp"| CredSSPAuth["CredSSPTransport"]
-    UserAuth -->|"Default / -H :hash"| SPNEGOAuth["SPNEGOTransport"]
-
-    CertAuth -->|Mutual TLS 5986| HTTPS_Enc["TLS 1.3 / Client Cert X.509"]
-    KerbAuth -->|KRB5_AP_REQ GSS-API| Kerb_Enc["HTTP-Kerberos-session-encrypted"]
-    CredSSPAuth -->|TSSSP ASN.1 Handshake| Cred_Enc["HTTP-CredSSP-session-encrypted"]
-    SPNEGOAuth -->|NTLMSSP / EPA Bindings| SPNEGO_Enc["HTTP-SPNEGO-session-encrypted"]
-```
-
----
-
-### 2.1 SPNEGO with Extended Protection for Authentication (EPA / CBT)
-
-When authenticating via NTLM over HTTPS, Windows WinRM enforces **Extended Protection for Authentication (EPA)** using **Channel Binding Tokens (CBT)** to eliminate NTLM relay attacks.
-
-```text
-+-------------------------------------------------------------------------------+
-| NTLMSSP Authenticate (Type 3) Message Structure                               |
-+-------------------------------------------------------------------------------+
-| Signature: "NTLMSSP\0" | MessageType: 0x00000003                              |
-+-------------------------------------------------------------------------------+
-| LmChallengeResponse / NtChallengeResponse (NTLMv2 Compute)                   |
-+-------------------------------------------------------------------------------+
-| TargetName: "CORP" | UserName: "Administrator" | Workstation: "PWN-NODE"      |
-+-------------------------------------------------------------------------------+
-| SessionKey / MIC (Message Integrity Check over Type 1 + Type 2 + Type 3)      |
-+-------------------------------------------------------------------------------+
-| ChannelBindings (MD5 of GSS Channel Binding Structure with Server Cert Hash)  |
-+-------------------------------------------------------------------------------+
-```
-
-#### Low-Level NTLMv2 & CBT Derivation Algorithm:
-1. **NTLMv2 Hash Calculation**:
-   $$\text{ResponseKeyNT} = \text{HMAC-MD5}(\text{NT\_Hash}, \text{Upper}(\text{UserName}) + \text{TargetName})$$
-   $$\text{NTLMv2\_Response} = \text{HMAC-MD5}(\text{ResponseKeyNT}, \text{ServerChallenge} + \text{ClientChallenge})$$
-2. **Server Certificate Extraction**: Fetches remote server public TLS certificate DER bytes via `get_server_certificate(url)`.
-3. **Endpoint Hash**: Calculates SHA-256 digest over the DER certificate:
-   $$\text{cert\_hash} = \text{SHA-256}(\text{der\_certificate})$$
-4. **Application Data Binding**: Constructs RFC 5929 `tls-server-end-point` application channel binding:
-   $$\text{app\_data} = \text{"tls-server-end-point:"} + \text{cert\_hash}$$
-5. **GSS Channel Binding Struct**:
-   $$\text{gss\_data} = \text{zeros}(16) + \text{pack\_uint32\_le}(\text{len}(\text{app\_data})) + \text{app\_data}$$
-   $$\text{cbt\_md5} = \text{MD5}(\text{gss\_data})$$
-6. **NTLMv2 Attribute Insertion**: Injects `cbt_md5` into the `MsvChannelBindings` target information AV_PAIR (`0x000A`) within the NTLMSSP Type 3 authenticate token.
-
----
-
-### 2.2 Kerberos GSS-API Transport & Session Encryption
-
-Under Active Directory environments, PwnRM leverages native Kerberos authentication:
-1. Resolves SPN target: `WSMAN/<hostname>` or `HTTP/<hostname>`.
-2. Obtains Kerberos service ticket (via `.ccache` or ticket granting service).
-3. Constructs `GSS_Wrap` tokens conforming to RFC 4121 (Kerberos Version 5 GSS-API Mechanism):
-   - Header `0x0504` (Wrap Token).
+For Kerberos authentication (`KerberosTransport`):
+1. Acquires Service Ticket (`HTTP/target:5985`) from local `.ccache` or KDC.
+2. Formats SPNEGO NegTokenInit encapsulating the Kerberos AP-REQ.
+3. Upon session establishment, exchanges **RFC 4121 GSS-API Wrap Tokens** (`0x0504` header):
    - Flags `0x01` (`SentByAcceptor` = false), `0x02` (`Sealed` = true).
    - Sequence Number verification and replay protection.
    - Encrypts payload with session subkey using **AES256-CTS-HMAC-SHA1-96**.
@@ -308,7 +186,7 @@ For environments configured with certificate-based WinRM authentication (e.g. sm
 
 ## 3. In-Band SOCKS5 Multiplexer & Port Forwarding Mechanics
 
-PwnRM replaces external binary pivoting agents (Chisel, Ligolo, FRP) with a zero-binary, in-band **SOCKS5 proxy multiplexer** (`pwnrm.core.tunnel.Socks5Server`).
+PwnRM replaces external binary pivoting agents with a zero-binary, in-band **SOCKS5 proxy multiplexer** (`pwnrm.core.tunnel.Socks5Server`) hardened with **thread-safe mutex locks and socket timeout protection**:
 
 ```mermaid
 sequenceDiagram
@@ -343,9 +221,10 @@ sequenceDiagram
 2. **Connection Request Evaluation**:
    - Client sends: `\x05` (VER), `\x01` (`CONNECT`), `\x00` (RSV), `ATYP` (`0x01` IPv4, `0x03` Domain, `0x04` IPv6), `[DST.ADDR]`, `[DST.PORT]` (2 bytes Big-Endian).
    - If unsupported command (`BIND` `0x02` or `UDP ASSOCIATE` `0x03`): returns `\x05\x07` (`COMMAND_NOT_SUPPORTED`) and terminates socket.
-3. **Data Streaming & Buffer Management**:
+3. **Data Streaming & Thread Safety**:
    - Implements non-blocking `select.select()` polling with **32,768 byte (32 KB)** chunk buffers.
-   - Automatically handles socket backpressure, connection resets, and graceful teardown when either endpoint closes the connection.
+   - All connection tracking and socket descriptors are guarded by `threading.Lock()` to prevent race conditions during concurrent multi-session switching.
+   - Includes timeout guards preventing orphaned socket retention on abrupt client disconnects.
 
 ---
 
@@ -368,8 +247,8 @@ class SessionNode:
 ### 4.1 Topology & Graph Operations:
 - **`!session list`**: Renders formatted ASCII session table with active pointer (`[*]`), target IP, transport mode, and latency.
 - **`!session switch <ID>`**: Updates active console context and recalculates remote working directory (`cwd`).
-- **`!session exec-all <CMD>`**: Fan-out command execution across all active nodes using a worker thread pool, isolating stdout/stderr per host.
-- **`!session save`**: Atomically serializes active topology to `~/.pwnrm/sessions/sessions.json` using atomic file descriptors (`O_CREAT | O_WRONLY | O_TRUNC`, mode `0o600`).
+- **`!session exec-all <CMD>`**: Fan-out command execution across all active nodes using a worker thread pool, tagging and isolating stdout/stderr per host (`[S:X | Host]`).
+- **`!session save`**: Atomically serializes active topology to `~/.pwnrm/sessions/sessions.json` encrypted with in-memory ephemeral Fernet keys.
 
 ---
 
@@ -379,6 +258,7 @@ All harvested credentials, tickets, certificates, and dumps are automatically ca
 
 ```text
 ~/.pwnrm/loot/dc01.corp.local/
+├── MANIFEST.json          # Index of all collected artifacts with SHA-256 hashes
 ├── credentials.json       # Array of {"type", "account", "secret", "source", "timestamp"}
 ├── tickets/               # Kerberos ccache / kirbi ticket blobs
 ├── certs/                 # ADCS user/machine .pfx and .pem certificates
@@ -396,17 +276,16 @@ All harvested credentials, tickets, certificates, and dumps are automatically ca
 
 ---
 
-## 6. OPSEC Profile & Traffic Shaper (`pwnrm.core.opsec`)
+## 6. OPSEC Profile & Polymorphic Traffic Shaper (`pwnrm.core.opsec`)
 
-Controls timing jitter, User-Agent header rotation, and command chunking:
+Controls timing jitter, User-Agent header rotation, AST cmdlet obfuscation, and command chunking:
 
 | Profile Mode | Minimum Sleep | Maximum Sleep | Command Obfuscation | Chunk Size |
 |---|---|---|---|---|
-| **`stealth`** | 1.5 s | 5.0 s | Active (Variable & AST split) | 16 KB |
+| **`stealth`** | 1.5 s | 5.0 s | Active (AST Cmdlet Backticks) | 16 KB |
 | **`balanced`** | 0.1 s | 0.5 s | Inactive | 64 KB |
 | **`aggressive`** | 0.0 s | 0.0 s | Inactive | 128 KB |
-| **`hybrid-cloud`** | 0.5 s | 2.0 s | Active (Browser Header Masquerade) | 32 KB |
+| **`hybrid-cloud`** | 0.5 s | 2.0 s | Active (Browser Header Masquerade + AST) | 32 KB |
 
-- **`jitter_sleep()`**: Samples a pseudo-random float from `uniform(min_delay, max_delay)` between PSRP execution turns to defeat statistical network anomaly detection.
-
-
+- **`jitter_sleep()`**: Samples a cryptographic random float using `secrets.randbelow()` between PSRP execution turns to defeat statistical network anomaly detection.
+- **`obfuscate_cmd()`**: Dynamically splits PowerShell cmdlet names with backticks (`` ` ``) and normalizes whitespace while preserving variable names and parameters.

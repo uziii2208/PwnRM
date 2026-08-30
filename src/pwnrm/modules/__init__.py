@@ -96,6 +96,11 @@ class ModuleManager:
         from .bloodhound import BloodhoundModule
         from .lateral import LateralModule
         from .playbook import PlaybookModule
+        from .vss import VSSModule
+        from .coerce import CoerceModule
+        from .laps import LAPSModule
+        from .acl import ACLModule
+        from .token import TokenModule
 
         builtins = [
             ADCSModule,
@@ -106,6 +111,11 @@ class ModuleManager:
             BloodhoundModule,
             LateralModule,
             PlaybookModule,
+            VSSModule,
+            CoerceModule,
+            LAPSModule,
+            ACLModule,
+            TokenModule,
         ]
         for b in builtins:
             try:

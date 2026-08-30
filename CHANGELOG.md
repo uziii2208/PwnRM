@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.1.0] - 2026-08-30
+
+### Next-Gen Post-Exploitation Suite (VSS, Coercion, LAPS, ACL & Token Impersonation)
+
+This release expands PwnRM into an elite operator platform with 5 new specialized attack modules, in-memory credential extraction bypassing EDR, coerced authentication triggers, Server 2025 LAPS hunting, DACL privilege escalation analysis, polymorphic backtick command obfuscation, and hardened SOCKS5 multiplexing.
+
+### Added & Enhanced
+- **In-Memory VSS Shadow Copy Extractor (`!vss`)**:
+  - Direct WMI / CIM reflection (`Win32_ShadowCopy`) to extract active `SAM`, `SYSTEM`, and `NTDS.dit` hives without executing `vssadmin.exe` or `ntdsutil.exe` (completely evading EDR process creation telemetry).
+  - Automated post-extraction cleanup instantly deleting shadow copies to maintain forensic hygiene.
+- **Coerced Authentication Engine (`!coerce`)**:
+  - Implements multi-vector coerced authentication from the remote target to operator listeners (Responder / ntlmrelayx).
+  - Vectors: WebDAV HTTP UNC paths (bypassing SMB signing for ESC8 Web Enrollment relays), MS-RPRN Print Spooler (`\pipe\spoolss`), MS-EFSR PetitPotam (`\pipe\efsrpc`), and MS-DFSNM (`\pipe\netdfs`).
+- **Windows LAPS & Server 2025 Hunter (`!laps`)**:
+  - Queries LDAP in-memory for both Legacy LAPS (`ms-Mcs-AdmPwd`) and Modern Windows Server 2025 / Windows 11 LAPS (`msLAPS-Password`, `msLAPS-EncryptedPassword`, `msLAPS-PasswordHistory`).
+- **Active Directory DACL & Privilege Escalation Scout (`!acl`)**:
+  - Audits discretionary access control lists on Tier-0 objects (AdminSDHolder, Domain Admins, Domain Controllers, KRBTGT, GPOs).
+  - Discovers high-risk access rights (`GenericAll`, `WriteDacl`, `WriteOwner`, `GenericWrite`, `User-Force-Change-Password`).
+- **Process Token Hunter & In-Memory Impersonation (`!token`)**:
+  - In-memory process token enumeration across logon sessions and privilege escalation triage (`SeImpersonatePrivilege`, `SeAssignPrimaryTokenPrivilege`, `SeDebugPrivilege`, `SeBackupPrivilege`).
+- **Polymorphic PowerShell AST Command Obfuscation (`core.opsec`)**:
+  - Added AST-safe dynamic backtick and whitespace splitting for PowerShell cmdlets when `obfuscate_commands` is active in `stealth` and `hybrid-cloud` profiles.
+  - Upgraded jitter sleep calculations to use cryptographic random state (`secrets`).
+- **Thread-Safe SOCKS5 Proxy & Port Forwarding Multiplexing (`core.tunnel`)**:
+  - Added thread-safe locking and socket timeout protections preventing deadlocks or memory retention on abrupt client disconnects.
+- **Test Suite Expansion**:
+  - Added 5 dedicated test modules (`test_vss.py`, `test_coerce.py`, `test_laps.py`, `test_acl.py`, `test_token.py`), bringing the test suite to 41 passing unit and security regression tests.
+
+---
+
 ## [2.0.1] - 2026-08-29
 
 ### Security Hardening & Full Niche Operator Quality Pass

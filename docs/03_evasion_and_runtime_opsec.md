@@ -100,102 +100,46 @@ amsi!AmsiScanBuffer:
 Standard AMSI bypass strings (e.g. `[Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')`) are heavily signatured by Microsoft Defender. PwnRM bypasses static detection by dynamically resolving function pointers via reflection and applying an immediate return patch:
 
 ```nasm
-; Return E_INVALIDARG (0x80070057) to force AMSI into a fail-open state:
-    b8 57 00 07 80      mov     eax, 0x80070057         ; HRESULT E_INVALIDARG
+; Polymorphic E_INVALIDARG return stub:
+    b8 57 00 07 80      mov     eax, 0x80070057         ; HRESULT: E_INVALIDARG
     c3                  ret
 ```
 
-#### Memory Page Protection Transition Flow:
-1. **Module Resolution**: Obtains the base address of `amsi.dll` via dynamic reflection across loaded assemblies (`[AppDomain]::CurrentDomain.GetAssemblies()`).
-2. **Function Address Discovery**: Locates `AmsiScanBuffer` virtual address without invoking `GetProcAddress`.
-3. **Memory Page Transition**: Calls `kernel32.dll!VirtualProtect`:
-   - `lpAddress`: Address of `AmsiScanBuffer`
-   - `dwSize`: 6 bytes
-   - `flNewProtect`: `PAGE_EXECUTE_READWRITE` (`0x40`)
-   - `lpflOldProtect`: Stored for restoration (`0x20` / `PAGE_EXECUTE_READ`)
-4. **Byte Overwrite**: Writes 6 patch bytes `\xb8\x57\x00\x07\x80\xc3` via `[System.Runtime.InteropServices.Marshal]::Copy()`.
-5. **Memory Protection Restoration**: Immediately calls `VirtualProtect` to restore `PAGE_EXECUTE_READ` (`0x20`), preventing memory scanners (Moneta, PE-sieve) from flagging suspicious `PAGE_EXECUTE_READWRITE` code sections.
+When `AmsiScanBuffer` returns `0x80070057`, the caller treats the failure as a benign argument error and continues execution without blocking the script.
 
 ---
 
-### 2.4 Hardware Breakpoint (DR0-DR3) Hooking Alternative
+## 3. In-Process ETW Telemetry Silencing (`ntdll.dll!EtwEventWrite`)
 
-To operate in environments where memory page modification is monitored by hypervisor-enforced memory integrity (HVCI), PwnRM can configure hardware debug registers:
-1. Sets `DR0` register to the address of `AmsiScanBuffer`.
-2. Sets `DR7` control register to enable local breakpoint on execution.
-3. Registers a Vectored Exception Handler (VEH) via `AddVectoredExceptionHandler`.
-4. When `STATUS_SINGLE_STEP` is triggered:
-   - Sets `RCX` or `RAX` to `0x80070057` (`E_INVALIDARG`).
-   - Increments `RIP` to return directly to caller without modifying code memory bytes.
+Event Tracing for Windows (ETW) provides high-fidelity kernel and user-mode event streams. PowerShell writes all executed ScriptBlocks to the `Microsoft-Windows-PowerShell` ETW provider (Event ID 4104).
 
----
+### 3.1 Dual ETW Memory Neutralization
 
-## 3. Event Tracing for Windows (ETW) Blinding (`ntdll.dll!EtwEventWrite`)
-
-ETW streams security events from PowerShell (`Microsoft-Windows-PowerShell`, Provider GUID `{A0C1853B-5C40-4B15-8766-3CF1C58F985A}`) and .NET runtimes directly into the Windows Event Log and EDR sensors.
-
-### 3.1 PowerShell Event IDs Neutralized
-
-| Event ID | Provider Name | Telemetry Content Captured |
-|---|---|---|
-| **Event ID 4104** | `Microsoft-Windows-PowerShell/Operational` | **ScriptBlock Logging**: Captures full decoded text of executed scripts and dynamic blocks. |
-| **Event ID 4103** | `Microsoft-Windows-PowerShell/Operational` | **Module Logging**: Captures pipeline execution details and cmdlet invocations. |
-| **Event ID 4100** | `Microsoft-Windows-PowerShell/Operational` | **Transcription Logging**: Logs all interactive console inputs and text outputs to disk. |
-| **Event ID 1** | `Microsoft-Windows-DotNETRuntime` | **CLR Assembly Load**: Tracks in-memory assembly loads and JIT method compilation. |
-
----
-
-### 3.2 x64 Disassembly of `ntdll!EtwEventWrite`
+PwnRM silences ETW by locating both `EtwEventWrite` and `EtwEventWriteFull` in `ntdll.dll` and applying a return-zero patch:
 
 ```nasm
-ntdll!EtwEventWrite:
-    48 89 5c 24 08      mov     qword ptr [rsp+8], rbx
-    48 89 6c 24 10      mov     qword ptr [rsp+10h], rbp
-    48 89 74 24 18      mov     qword ptr [rsp+18h], rsi
-    57                  push    rdi
-    48 83 ec 30         sub     rsp, 30h
-    49 8b d8            mov     rbx, r8                 ; EventDescriptor
+; Return STATUS_SUCCESS (0x00000000) and clean up 5 stack parameters (0x14 bytes):
+    31 c0               xor     eax, eax                ; STATUS_SUCCESS
+    c2 14 00            ret     0x14                    ; Clean up 20 bytes on stack
 ```
 
-### 3.3 PwnRM ETW Silencing Patch Logic
-
-PwnRM neutralizes ETW telemetry across the host process by replacing the function prologue with an immediate return of `STATUS_SUCCESS` (`0x00000000`):
-
-```nasm
-; Clear EAX and return immediately
-    31 c0               xor     eax, eax                ; STATUS_SUCCESS (0)
-    c2 14 00            ret     0x14                    ; Clean up 5 stack parameters (0x14 = 20 bytes)
-```
-- **Byte Sequence**: `\x31\xc0\xc2\x14\x00`.
-- **Result**: Every downstream call to `EtwEventWrite` in the current process silently returns success without emitting telemetry to kernel trace sessions or Event Log buffers.
+This prevents any telemetry events from reaching Defender for Endpoint, Sysmon, or SIEM log forwarders while allowing the process to execute unimpeded.
 
 ---
 
-## 4. In-Memory D/Invoke & Dynamic Reflection Engine
+## 4. Dynamic D/Invoke API Resolution & Memory Protection Management
 
-Traditional post-exploitation scripts rely on `Add-Type -TypeDefinition`, which creates temporary C# source files (`.cs`) in `%TEMP%` and compiles them using `csc.exe` (invoking `cvtres.exe`), generating high-signal process creation telemetry (Sysmon Event ID 1 & Event ID 11).
+To avoid triggering EDR API hooks on `kernel32.dll!LoadLibrary` and `GetProcAddress`, PwnRM uses dynamic **D/Invoke** reflection to locate exported functions directly from the PE export directory in memory.
 
-PwnRM uses **Dynamic Reflection & D/Invoke** without invoking `csc.exe`:
-
-```mermaid
-sequenceDiagram
-    participant Script as PwnRM Payload
-    participant AppDomain as .NET AppDomain
-    participant Mem as Process Heap Memory
-    participant Kernel as kernel32.dll / ntdll.dll
-
-    Script->>AppDomain: Locate System.dll / mscorlib.dll
-    AppDomain->>Mem: Allocate Unmanaged Memory ([Marshal]::AllocHGlobal)
-    Script->>Kernel: Query Proc Address dynamically via delegates
-    Script->>Mem: Write raw assembly opcodes into allocated memory
-    Script->>Kernel: VirtualProtect(PAGE_EXECUTE_READWRITE)
-    Script->>Mem: Execute via dynamic delegate invocation
-    Script->>Mem: Zero & Free memory ([Marshal]::FreeHGlobal)
-```
-
-### 4.1 ROR13 Hash-Based API Resolution
-
-To eliminate cleartext string references to sensitive Win32 API functions (`VirtualProtect`, `CreateProcess`, `AmsiScanBuffer`), PwnRM dynamically traverses the PE Export Address Table (EAT) and matches exported symbols against computed **ROR13 hashes**:
+### 4.1 Export Directory Parsing Algorithm:
+1. Locate module base address via `Process.GetCurrentProcess().Modules`.
+2. Parse DOS Header (`IMAGE_DOS_HEADER.e_lfanew`) to find the NT Headers (`IMAGE_NT_HEADERS64`).
+3. Locate `OptionalHeader.DataDirectory[0]` (`IMAGE_DIRECTORY_ENTRY_EXPORT`).
+4. Read `IMAGE_EXPORT_DIRECTORY`:
+   - `AddressOfFunctions` (RVA table of exported functions)
+   - `AddressOfNames` (RVA table of function name strings)
+   - `AddressOfNameOrdinals` (Ordinal table)
+5. Compare export names using a custom ROR13 hash:
 
 $$\text{Hash}(S) = \sum_{c \in S} \text{ROR32}(\text{CurrentHash}, 13) + c$$
 
@@ -239,15 +183,52 @@ When operating on an endpoint, PwnRM's `!evasion --edr` module queries loaded ke
 
 ---
 
-## 6. Network Transport OPSEC & Traffic Camouflage
+## 6. Process Token Hunter & In-Memory Impersonation Suite (`!token`)
 
-1. **Jitter & Delays**: PwnRM implements configurable timing jitter (`!opsec jitter <min> <max>`) to prevent beacon frequency detection by network threat analysis tools.
-2. **Encrypted PSRP Chunking**: Commands and outputs are fragmented into encrypted SOAP envelopes. To network monitors, all post-exploitation traffic is indistinguishable from standard Microsoft remote management operations.
-3. **In-Band Proxy Multiplexing**: SOCKS5 tunneling (`!socks`) multiplexes TCP data streams over existing WinRM HTTP (5985) or HTTPS (5986) connections without creating separate outbound ports.
+Windows access tokens encapsulate the security context of a process or thread. When an unprivileged operator acquires access to a machine (or runs under a service account), `!token` maps and impersonates higher-privileged process tokens:
+
+```mermaid
+graph TD
+    Op["Current User / Service Account (e.g. IIS / Network Service)"]
+    Op --> CheckPrivs["Token Privilege Triage"]
+    
+    CheckPrivs --> SeImp["SeImpersonatePrivilege / SeAssignPrimaryToken"]
+    CheckPrivs --> SeDebug["SeDebugPrivilege"]
+    CheckPrivs --> SeBackup["SeBackupPrivilege"]
+
+    SeImp --> PipeImp["Named Pipe Server Reflection (ImpersonateNamedPipeClient)"]
+    SeDebug --> DupToken["OpenProcess -> OpenProcessToken -> DuplicateTokenEx"]
+    
+    PipeImp & DupToken --> SYSTEM_Token["Impersonated NT AUTHORITY\SYSTEM Token"]
+    SYSTEM_Token --> WinRM_Context["Elevated Execution Context in wsmprovhost.exe"]
+```
+
+### 6.1 Token Impersonation Mechanics:
+1. **Named Pipe Client Impersonation**: Creates a local named pipe server (`CreateNamedPipe`) and triggers an RPC call from a local SYSTEM service (e.g. `spoolss` or `efsrpc`). When the service connects, calls `ImpersonateNamedPipeClient` to assume the SYSTEM security context without dropping executable binaries to disk.
+2. **Process Token Duplication**: If `SeDebugPrivilege` is enabled, calls `OpenProcess(PROCESS_QUERY_INFORMATION, ...)`, `OpenProcessToken(TOKEN_DUPLICATE | TOKEN_QUERY, ...)`, and `DuplicateTokenEx` to clone tokens from privileged processes (`lsass.exe`, `winlogon.exe`, `services.exe`).
 
 ---
 
-## 7. Raw Winsock Win32 Reverse Shell (`!revshell`)
+## 7. Polymorphic PowerShell AST Command Obfuscation & CSPRNG Jitter (`core.opsec`)
+
+To evade static and heuristic ScriptBlock logging (Event ID 4104) and process command-line detection (Event ID 4688), PwnRM integrates an **Abstract Syntax Tree (AST) safe polymorphic obfuscation engine**:
+
+```mermaid
+graph LR
+    PlainCmd["Get-Process -Name lsass"] --> AST_Parser["PowerShell AST Lexer / Tokenizer"]
+    AST_Parser --> Obfuscator["Cmdlet Backtick Insertion + Space Randomizer"]
+    Obfuscator --> PolyCmd["`G``e``t`-`P``r``o``c``e``s``s -Name lsass"]
+    PolyCmd --> Jitter["CSPRNG Delay Jitter (secrets.randbelow)"]
+    Jitter --> PSRP_Wire["Encrypted PSRP SOAP Envelope"]
+```
+
+### 7.1 Obfuscation Principles:
+1. **Cmdlet Backtick Insertion**: PowerShell allows the backtick character (`` ` ``) to serve as an escape character inside identifier names (e.g., ``G`e`t`-`P`r`o`c`e`s`s``). PwnRM dynamically inserts backticks at randomized positions strictly within cmdlet identifiers, preserving parameter names, string literals, and variable expressions.
+2. **Cryptographic Jitter**: Rather than standard linear sleeps, PwnRM computes inter-command delays using Python's `secrets` module, producing non-deterministic timing distributions that defeat network traffic frequency analysis.
+
+---
+
+## 8. Raw Winsock Win32 Reverse Shell (`!revshell`)
 
 When an operator requires a direct, unmanaged TCP reverse shell, PwnRM invokes native Win32 sockets directly via D/Invoke without touching PowerShell wrappers:
 
