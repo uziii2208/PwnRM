@@ -20,7 +20,7 @@ def get_shares_ps(quick: bool = False, targets: Optional[List[str]] = None) -> s
 
     if targets:
         # [NICHE AUDIT 2 FIX] Embed as PS string array with proper single-quote escaping: @('host1','host2')
-        target_str = ",".join(f"'{t.strip().replace("'", "''")}'" for t in targets if t.strip())
+        target_str = ",".join("'" + t.strip().replace("'", "''") + "'" for t in targets if t.strip())
         ps = ps.replace("'__TARGETS__'", target_str)
     else:
         # Replace the entire @('__TARGETS__') expression so the result is @()
